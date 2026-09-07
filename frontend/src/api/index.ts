@@ -1,0 +1,135 @@
+import axios from 'axios'
+
+const http = axios.create({
+  baseURL: '/api',
+  timeout: 30000
+})
+
+http.interceptors.response.use(
+  (resp) => resp,
+  (err) => {
+    const msg = err?.response?.data?.error || err?.message || '请求失败'
+    return Promise.reject(new Error(msg))
+  }
+)
+
+export interface FsEntry {
+  name: string
+  path: string
+  is_dir: boolean
+  is_archive: boolean
+  size: number
+  mod_time: string
+}
+
+export interface ListDirResponse {
+  path: string
+  entries: FsEntry[]
+}
+
+export interface Task {
+  id: number
+  type: 'decompress' | 'compress'
+  source_path: string
+  target_path: string
+  temp_path: string
+  status: 'pending' | 'running' | 'succeeded' | 'failed'
+  progress_percent: number
+  processed_bytes: number
+  total_bytes: number
+  processed_entries: number
+  total_entries: number
+  current_entry: string
+  error: string
+  created_at: string
+  started_at: string | null
+  completed_at: string | null
+}
+
+export interface TaskListResponse {
+  items: Task[]
+  total: number
+  page: number
+  page_size: number
+}
+
+export interface AppConfig {
+  max_concurrent_tasks: number
+  default_browse_path: string
+}
+
+export interface BulkResponse {
+  created: number
+  ids: number[]
+}
+
+export interface BatchCreateResponse extends BulkResponse {
+  skipped: number
+}
+
+export interface Password {
+  id: number
+  value: string
+  sort_order: number
+  note: string
+  enabled: boolean
+  created_at: string
+  updated_at: string
+}
+
+export const api = {
+  async getConfig(): Promise<AppConfig> {
+    return (await http.get<AppConfig>('/config')).data
+  },
+  async listDir(path?: string): Promise<ListDirResponse> {
+    const params = path ? { path } : {}
+    return (await http.get<ListDirResponse>('/fs/list', { params })).data
+  },
+  async createTask(type: 'decompress' | 'compress', path: string): Promise<Task> {
+    return (await http.post<Task>('/tasks', { type, path })).data
+  },
+  async bulkDecompress(path: string, recursive = false): Promise<BulkResponse> {
+    return (await http.post<BulkResponse>('/tasks/bulk-decompress-folder', {
+      path,
+      recursive
+    })).data
+  },
+  async bulkCompress(path: string, recursive = false): Promise<BulkResponse> {
+    return (await http.post<BulkResponse>('/tasks/bulk-compress-folder', {
+      path,
+      recursive
+    })).data
+  },
+  async createTasksBatch(type: 'decompress' | 'compress', paths: string[]): Promise<BatchCreateResponse> {
+    return (await http.post<BatchCreateResponse>('/tasks/batch', { type, paths })).data
+  },
+  async listTasks(params: Record<string, string | number>): Promise<TaskListResponse> {
+    return (await http.get<TaskListResponse>('/tasks', { params })).data
+  },
+  async getTask(id: number | string): Promise<Task> {
+    return (await http.get<Task>(`/tasks/${id}`)).data
+  },
+  async deleteTask(id: number | string): Promise<void> {
+    await http.delete(`/tasks/${id}`)
+  },
+  async listPasswords(): Promise<{ items: Password[]; total: number }> {
+    return (await http.get('/passwords')).data
+  },
+  async createPassword(value: string, note?: string): Promise<Password> {
+    return (await http.post<Password>('/passwords', { value, note })).data
+  },
+  async updatePassword(id: number, value: string, note?: string): Promise<Password> {
+    return (await http.patch<Password>(`/passwords/${id}`, { value, note })).data
+  },
+  async setPasswordEnabled(id: number, enabled: boolean): Promise<Password> {
+    return (await http.patch<Password>(`/passwords/${id}/enabled`, { enabled })).data
+  },
+  async deletePassword(id: number): Promise<void> {
+    await http.delete(`/passwords/${id}`)
+  },
+  async reorderPasswords(items: { id: number; sort_order: number }[]): Promise<void> {
+    await http.post('/passwords/reorder', { items })
+  }
+}
+
+export default api

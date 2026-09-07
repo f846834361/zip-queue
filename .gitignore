@@ -1,0 +1,29 @@
+# Go
+/backend/zip-queue
+/backend/zip-queue.exe
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Node
+node_modules/
+frontend/dist/
+backend/web/dist/*
+!backend/web/dist/.gitkeep
+
+# Data
+/data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# IDE
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

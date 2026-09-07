@@ -1,0 +1,17 @@
+# Zip-Queue 运行配置（开发默认值；Docker 部署时挂载覆盖）
+server:
+  port: 8787            # HTTP 监听端口
+  read_timeout: 60s     # 读超时
+  write_timeout: 60s    # 写超时
+
+database:
+  path: ./data/zip-queue.db   # SQLite 文件路径（相对 backend 工作目录）
+
+worker:
+  max_concurrent_tasks: 1     # 同时执行任务数（默认 1）
+
+browse:
+  default_path: "C:/"        # 文件浏览器起始路径（Windows 开发；Docker 内改为 /data/files 等挂载点）
+
+log:
+  level: debug               # debug / info / warn / error

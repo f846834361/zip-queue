@@ -1,0 +1,38 @@
+# Git
+.git
+.gitignore
+
+# IDE / tooling
+.vscode
+.trae
+.idea
+
+# Go build artifacts
+backend/zip-queue
+backend/zip-queue.exe
+*.exe
+*.test
+*.out
+
+# Frontend build artifacts (rebuilt in Docker)
+frontend/node_modules
+frontend/dist
+
+# Backend embedded web dist (rebuilt in Docker from frontend)
+backend/web/dist/*
+!backend/web/dist/.gitkeep
+
+# Data / runtime
+data
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Docs
+*.md
+LICENSE
+
+# OS
+.DS_Store
+Thumbs.db

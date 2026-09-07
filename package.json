@@ -1,0 +1,15 @@
+{
+  "name": "zip-queue",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "dev": "concurrently -n backend,frontend -c blue,green \"go run ./backend/cmd/zip-queue -config backend/config.yaml\" \"npm --prefix frontend run dev\"",
+    "dev:backend": "go run ./backend/cmd/zip-queue -config backend/config.yaml",
+    "dev:frontend": "npm --prefix frontend run dev",
+    "build:frontend": "npm --prefix frontend run build",
+    "build": "npm run build:frontend && go build -o backend/zip-queue ./backend/cmd/zip-queue"
+  },
+  "devDependencies": {
+    "concurrently": "^9.0.1"
+  }
+}

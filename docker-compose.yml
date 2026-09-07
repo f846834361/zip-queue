@@ -1,0 +1,30 @@
+services:
+  zip-queue:
+    image: zip-queue:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: zip-queue
+    restart: unless-stopped
+    ports:
+      - "8787:8787"
+    volumes:
+      # 数据库持久化
+      - zip-queue-data:/data
+      # 如需浏览/处理宿主机特定目录，取消注释并修改路径：
+      # - /host/path/to/files:/data/files
+    environment:
+      # 可通过环境变量覆盖配置（可选）
+      # ZQ_SERVER_PORT: "8787"
+      # ZQ_WORKER_MAX_CONCURRENT_TASKS: "1"
+      # ZQ_LOG_LEVEL: "info"
+      TZ: Asia/Shanghai
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8787/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  zip-queue-data:
