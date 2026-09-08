@@ -290,7 +290,12 @@ func (a *API) ListTasks(c *gin.Context) {
 	}
 	if v := c.Query("completed_before"); v != "" {
 		if t, err := parseTime(v); err == nil {
-			q = q.Where("completed_at <= ?", t)
+			if isDateOnly(v) {
+				// 纯日期作为截止条件时，包含该日 0:00 至 23:59:59 全天。
+				q = q.Where("completed_at < ?", t.AddDate(0, 0, 1))
+			} else {
+				q = q.Where("completed_at <= ?", t)
+			}
 		}
 	}
 	var total int64
@@ -351,9 +356,33 @@ func (a *API) DeleteTask(c *gin.Context) {
 	c.JSON(200, gin.H{"ok": true})
 }
 
+// parseTime 解析任务筛选时间参数。
+// 支持带时区的 RFC3339，以及服务器本地时区下常见的日期/日期时间格式。
+// 统一转到 time.Local，保证与入库的 completed_at（time.Now 本地时区）可一致比较。
 func parseTime(s string) (time.Time, error) {
 	if t, err := time.Parse(time.RFC3339, s); err == nil {
-		return t, nil
+		return t.In(time.Local), nil
 	}
-	return time.Parse("2006-01-02", s)
+	layouts := []string{
+		"2006-01-02 15:04:05",
+		"2006-01-02 15:04",
+		"2006-01-02T15:04:05",
+		"2006-01-02T15:04",
+		"2006-01-02",
+	}
+	var lastErr error
+	for _, layout := range layouts {
+		if t, err := time.ParseInLocation(layout, s, time.Local); err == nil {
+			return t, nil
+		} else {
+			lastErr = err
+		}
+	}
+	return time.Time{}, lastErr
+}
+
+// isDateOnly 判断参数是否为纯日期 YYYY-MM-DD（不带时间）。
+func isDateOnly(s string) bool {
+	_, err := time.Parse("2006-01-02", s)
+	return err == nil
 }

@@ -11,6 +11,39 @@ const showDialog = ref(false)
 const editing = ref<Password | null>(null)
 const form = ref({ value: '', note: '' })
 
+// 批量操作"穿透文件夹"开关（持久化在后端 settings）
+const penetrateSubfolders = ref(false)
+const savingPenetrate = ref(false)
+
+async function loadConfig() {
+  try {
+    const cfg = await api.getConfig()
+    // 仅当后端明确返回 true 才视为开启；undefined/null 一律按关闭（默认否），
+    // 避免赋值为 undefined 导致 q-toggle 显示成"中间"态
+    penetrateSubfolders.value = cfg.penetrate_subfolders === true
+  } catch (e) {
+    $q.notify({ type: 'negative', message: (e as Error).message })
+  }
+}
+
+async function savePenetrate(val: boolean) {
+  if (savingPenetrate.value) return
+  const prev = penetrateSubfolders.value
+  savingPenetrate.value = true
+  try {
+    await api.updateConfig({ penetrate_subfolders: val })
+    $q.notify({
+      type: 'positive',
+      message: val ? '已开启穿透文件夹' : '已关闭穿透文件夹'
+    })
+  } catch (e) {
+    penetrateSubfolders.value = prev
+    $q.notify({ type: 'negative', message: (e as Error).message })
+  } finally {
+    savingPenetrate.value = false
+  }
+}
+
 const columns = [
   { name: 'enabled', label: '状态', field: 'enabled', align: 'center' as const },
   { name: 'sort', label: '序号', field: 'sort_order', align: 'left' as const, sortable: true },
@@ -113,14 +146,8 @@ async function remove(row: Password) {
 async function moveUp(row: Password) {
   const idx = passwords.value.findIndex((p) => p.id === row.id)
   if (idx <= 0) return
-  const items = passwords.value.map((p, i) => ({ id: p.id, sort_order: i }))
-  const tmp = items[idx]
-  items[idx] = items[idx - 1]
-  items[idx - 1] = tmp
-  items[idx - 1].sort_order = idx - 1
-  items[idx].sort_order = idx
   try {
-    await api.reorderPasswords(items)
+    await api.reorderPassword(row.id, -1)
     await fetchList()
   } catch (e) {
     $q.notify({ type: 'negative', message: (e as Error).message })
@@ -130,25 +157,42 @@ async function moveUp(row: Password) {
 async function moveDown(row: Password) {
   const idx = passwords.value.findIndex((p) => p.id === row.id)
   if (idx < 0 || idx >= passwords.value.length - 1) return
-  const items = passwords.value.map((p, i) => ({ id: p.id, sort_order: i }))
-  const tmp = items[idx]
-  items[idx] = items[idx + 1]
-  items[idx + 1] = tmp
-  items[idx].sort_order = idx
-  items[idx + 1].sort_order = idx + 1
   try {
-    await api.reorderPasswords(items)
+    await api.reorderPassword(row.id, 1)
     await fetchList()
   } catch (e) {
     $q.notify({ type: 'negative', message: (e as Error).message })
   }
 }
 
-onMounted(fetchList)
+onMounted(() => {
+  void loadConfig()
+  void fetchList()
+})
 </script>
 
 <template>
   <q-page padding>
+    <!-- 批量操作设置 -->
+    <q-card flat bordered class="q-mb-md">
+      <q-card-section>
+        <div class="row items-center justify-between">
+          <div class="q-pr-lg">
+            <div class="text-h6 text-weight-medium">批量操作设置</div>
+            <div class="text-caption text-grey-7 q-mt-xs">
+              开启「穿透文件夹」后，文件页面的「解压全部 / 压缩全部」会递归处理当前目录下的所有子文件夹，而不仅限于当前目录本身。
+            </div>
+          </div>
+          <q-toggle
+            v-model="penetrateSubfolders"
+            :disable="savingPenetrate"
+            color="primary"
+            @update:model-value="savePenetrate"
+          />
+        </div>
+      </q-card-section>
+    </q-card>
+
     <!-- 解压密码卡片 -->
     <q-card flat bordered class="q-mb-md">
       <q-card-section>
@@ -183,10 +227,28 @@ onMounted(fetchList)
           </template>
           <template #body-cell-actions="props">
             <q-td :props="props">
-              <q-btn flat dense round icon="arrow_upward" size="sm" @click.stop="moveUp(props.row)">
+              <q-btn
+                flat
+                dense
+                round
+                icon="arrow_upward"
+                size="sm"
+                :color="props.rowIndex === 0 ? 'grey-5' : 'primary'"
+                :disable="props.rowIndex === 0"
+                @click.stop="moveUp(props.row)"
+              >
                 <q-tooltip>上移</q-tooltip>
               </q-btn>
-              <q-btn flat dense round icon="arrow_downward" size="sm" @click.stop="moveDown(props.row)">
+              <q-btn
+                flat
+                dense
+                round
+                icon="arrow_downward"
+                size="sm"
+                :color="props.rowIndex === passwords.length - 1 ? 'grey-5' : 'primary'"
+                :disable="props.rowIndex === passwords.length - 1"
+                @click.stop="moveDown(props.row)"
+              >
                 <q-tooltip>下移</q-tooltip>
               </q-btn>
               <q-btn flat dense round icon="edit" size="sm" @click.stop="openEdit(props.row)">

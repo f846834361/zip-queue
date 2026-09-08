@@ -2,10 +2,18 @@
 import { computed, onMounted, ref } from 'vue'
 import { useQuasar } from 'quasar'
 import api, { type AppConfig } from '../api'
+import { useUiStore } from '../stores/ui'
 
 const $q = useQuasar()
 
-const leftDrawerOpen = ref($q.platform.is.desktop)
+const ui = useUiStore()
+// 首次进入且无持久化记录时，按平台默认（桌面打开 / 移动端收起）
+ui.initDrawer($q.platform.is.desktop)
+const leftDrawerOpen = computed({
+  get: () => ui.leftDrawerOpen ?? $q.platform.is.desktop,
+  set: (open: boolean) => ui.setLeftDrawerOpen(open)
+})
+
 const config = ref<AppConfig | null>(null)
 
 const links = computed(() => [

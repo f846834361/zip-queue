@@ -27,7 +27,7 @@ func Open(dbPath string, logLevel string) (*gorm.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
-	if err := gdb.AutoMigrate(&model.Task{}, &model.Password{}); err != nil {
+	if err := gdb.AutoMigrate(&model.Task{}, &model.Password{}, &model.Setting{}); err != nil {
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
 	return gdb, nil

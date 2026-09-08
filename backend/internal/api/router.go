@@ -20,6 +20,7 @@ func Register(r *gin.RouterGroup, gdb *gorm.DB, pool *worker.Pool, cfg *config.C
 	a := &API{db: gdb, pool: pool, cfg: cfg}
 	r.GET("/health", a.Health)
 	r.GET("/config", a.Config)
+	r.PUT("/config", a.UpdateConfig)
 	r.GET("/fs/list", a.ListDir)
 	r.POST("/tasks", a.CreateTask)
 	r.POST("/tasks/batch", a.CreateTasksBatch)

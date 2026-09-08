@@ -135,25 +135,83 @@ func (a *API) SetPasswordEnabled(c *gin.Context) {
 	c.JSON(200, pw)
 }
 
-// ReorderPasswords 批量更新密码排序，接收 [{id, sort_order}] 列表。
+// ReorderPasswords 将某密码与相邻密码交换位置（上移/下移一位）。
+// 请求体仅 {id, direction}：direction = -1 上移一位，1 下移一位，恒定小报文。
+// 相邻交换只改写两条记录的 sort_order，其余记录不动。
 func (a *API) ReorderPasswords(c *gin.Context) {
 	var req struct {
-		Items []struct {
-			ID        uint `json:"id" binding:"required"`
-			SortOrder int  `json:"sort_order"`
-		} `json:"items" binding:"required"`
+		ID        uint `json:"id" binding:"required"`
+		Direction int  `json:"direction"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(400, gin.H{"error": err.Error()})
 		return
 	}
-	tx := a.db.Begin()
-	for _, item := range req.Items {
-		if err := tx.Model(&model.Password{}).Where("id = ?", item.ID).Update("sort_order", item.SortOrder).Error; err != nil {
-			tx.Rollback()
-			c.JSON(500, gin.H{"error": err.Error()})
-			return
+	if req.Direction != -1 && req.Direction != 1 {
+		c.JSON(400, gin.H{"error": "direction must be -1 (up) or 1 (down)"})
+		return
+	}
+
+	// 当前完整顺序
+	var list []model.Password
+	if err := a.db.Order("sort_order asc, id asc").Find(&list).Error; err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	cur := -1
+	for i := range list {
+		if list[i].ID == req.ID {
+			cur = i
+			break
 		}
+	}
+	if cur == -1 {
+		c.JSON(404, gin.H{"error": "password not found"})
+		return
+	}
+	adj := cur + req.Direction
+	if adj < 0 || adj >= len(list) {
+		c.JSON(200, gin.H{"ok": true}) // 已在边界，无需处理
+		return
+	}
+
+	// 若存在重复 sort_order（历史脏数据），先整表归一化为 0..n-1，保证交换有意义。
+	duplicated := false
+	seen := make(map[int]struct{}, len(list))
+	for i := range list {
+		if _, ok := seen[list[i].SortOrder]; ok {
+			duplicated = true
+			break
+		}
+		seen[list[i].SortOrder] = struct{}{}
+	}
+
+	tx := a.db.Begin()
+	if duplicated {
+		for i := range list {
+			if list[i].SortOrder == i {
+				continue
+			}
+			if err := tx.Model(&model.Password{}).Where("id = ?", list[i].ID).Update("sort_order", i).Error; err != nil {
+				tx.Rollback()
+				c.JSON(500, gin.H{"error": err.Error()})
+				return
+			}
+			list[i].SortOrder = i
+		}
+	}
+
+	// 交换相邻两条的 sort_order
+	a_, b_ := list[cur], list[adj]
+	if err := tx.Model(&model.Password{}).Where("id = ?", a_.ID).Update("sort_order", b_.SortOrder).Error; err != nil {
+		tx.Rollback()
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	if err := tx.Model(&model.Password{}).Where("id = ?", b_.ID).Update("sort_order", a_.SortOrder).Error; err != nil {
+		tx.Rollback()
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
 	}
 	if err := tx.Commit().Error; err != nil {
 		c.JSON(500, gin.H{"error": err.Error()})

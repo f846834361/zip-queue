@@ -3,6 +3,7 @@ import { onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useQuasar } from 'quasar'
 import api, { type Task } from '../api'
+import DateTimePicker from '../components/DateTimePicker.vue'
 
 const $q = useQuasar()
 const router = useRouter()
@@ -90,12 +91,35 @@ function buildParams() {
   if (filters.status) params.status = filters.status
   if (filters.type) params.type = filters.type
   if (filters.source_path) params.source_path = filters.source_path
-  if (filters.completed_after) params.completed_after = filters.completed_after
-  if (filters.completed_before) params.completed_before = filters.completed_before
+  const after = toRFC3339(filters.completed_after)
+  const before = toRFC3339(filters.completed_before)
+  if (after) params.completed_after = after
+  if (before) params.completed_before = before
   return params
 }
 
+// "YYYY-MM-DD HH:mm"（浏览器本地时间）→ RFC3339（含时区偏移），保证时间语义正确。
+function toRFC3339(v: string): string | null {
+  const d = new Date(v.replace(' ', 'T'))
+  if (Number.isNaN(d.getTime())) return null
+  return d.toISOString()
+}
+
+// 时间范围校验：开始必须早于结束，非法返回错误提示文案
+function checkRange(): string | null {
+  const after = toRFC3339(filters.completed_after)
+  const before = toRFC3339(filters.completed_before)
+  if (!after || !before) return null
+  if (after >= before) return '「完成时间从」必须早于「完成时间到」'
+  return null
+}
+
 async function fetchList() {
+  const rangeError = checkRange()
+  if (rangeError) {
+    $q.notify({ type: 'warning', message: rangeError })
+    return
+  }
   loading.value = true
   try {
     const resp = await api.listTasks(buildParams())
@@ -191,7 +215,7 @@ onMounted(fetchList)
               dense
             />
           </div>
-          <div class="col-12 col-md-3">
+          <div class="col-12 col-md-2">
             <q-input
               v-model="filters.source_path"
               label="源路径包含"
@@ -200,41 +224,11 @@ onMounted(fetchList)
               clearable
             />
           </div>
-          <div class="col-12 col-md-2">
-            <q-input
-              v-model="filters.completed_after"
-              label="完成开始日期"
-              outlined
-              dense
-              clearable
-              mask="YYYY-MM-DD"
-            >
-              <template #prepend>
-                <q-icon name="event" class="cursor-pointer">
-                  <q-popup-proxy cover transition-show="scale" transition-hide="scale">
-                    <q-date v-model="filters.completed_after" mask="YYYY-MM-DD" />
-                  </q-popup-proxy>
-                </q-icon>
-              </template>
-            </q-input>
+          <div class="col-12 fcol-md-18pct">
+            <date-time-picker v-model="filters.completed_after" label="完成时间从" default-time="00:00" />
           </div>
-          <div class="col-12 col-md-2">
-            <q-input
-              v-model="filters.completed_before"
-              label="完成结束日期"
-              outlined
-              dense
-              clearable
-              mask="YYYY-MM-DD"
-            >
-              <template #prepend>
-                <q-icon name="event" class="cursor-pointer">
-                  <q-popup-proxy cover transition-show="scale" transition-hide="scale">
-                    <q-date v-model="filters.completed_before" mask="YYYY-MM-DD" />
-                  </q-popup-proxy>
-                </q-icon>
-              </template>
-            </q-input>
+          <div class="col-12 fcol-md-18pct">
+            <date-time-picker v-model="filters.completed_before" label="完成时间到" default-time="23:59" />
           </div>
           <div class="col-12 col-md-1">
             <div class="row q-gutter-xs">
@@ -334,3 +328,13 @@ onMounted(fetchList)
     </q-card>
   </q-page>
 </template>
+
+<style scoped>
+/* Quasar 12 栅格只支持整数列，18% 宽度需自定义（md = ≥1024px） */
+@media (min-width: 1024px) {
+  .fcol-md-18pct {
+    flex: 0 0 18%;
+    max-width: 18%;
+  }
+}
+</style>

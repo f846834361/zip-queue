@@ -13,8 +13,10 @@ const manualPath = ref('')
 const entries = ref<FsEntry[]>([])
 const loading = ref(false)
 const selected = ref<string[]>([])
-const recursive = ref(false)
 const submitting = ref(false)
+
+// 是否穿透子文件夹，来自配置页的全局开关（默认关闭）
+const penetrateSubfolders = computed(() => !!config.value?.penetrate_subfolders)
 
 const columns = [
   { name: 'name', label: '名称', field: 'name', align: 'left' as const, sortable: true },
@@ -135,9 +137,12 @@ async function handleDecompress() {
       $q.notify({ type: 'info', message: '当前目录没有可解压的压缩包' })
       return
     }
+    const scopeText = penetrateSubfolders.value
+      ? '开启穿透：将连同当前目录所有子文件夹中的压缩包一起创建解压任务'
+      : '仅处理当前目录中的压缩包（不进入子目录）'
     const go = await confirmAction(
       '确认批量解压',
-      `当前目录下共有 ${bulkArchiveCount.value} 个压缩包，将全部创建解压任务（不进入子目录），任务完成后会删除对应的原压缩包。是否继续？`
+      `当前目录下共有 ${bulkArchiveCount.value} 个压缩包。${scopeText}，任务完成后会删除对应的原压缩包。是否继续？`
     )
     if (go) await bulkDecompress()
   } finally {
@@ -163,10 +168,15 @@ async function handleCompress() {
       $q.notify({ type: 'info', message: '当前目录没有可压缩的内容' })
       return
     }
-    const go = await confirmAction(
-      '确认批量压缩',
-      `将把当前目录下除压缩包外的 ${bulkCompressibleCount.value} 项内容全部压缩为同名 .zip（不进入子目录），任务完成后会删除原文件/文件夹。是否继续？`
-    )
+    const go = penetrateSubfolders.value
+      ? await confirmAction(
+          '确认批量压缩',
+          '开启穿透：将穿透当前目录所有子文件夹，把其中每个文件（非压缩包）单独创建压缩任务（文件夹本身不压缩），任务完成后会删除原文件。是否继续？'
+        )
+      : await confirmAction(
+          '确认批量压缩',
+          `将把当前目录下除压缩包外的 ${bulkCompressibleCount.value} 项内容全部压缩为同名 .zip（不进入子目录），任务完成后会删除原文件/文件夹。是否继续？`
+        )
     if (go) await bulkCompress()
   } finally {
     submitting.value = false
@@ -207,7 +217,7 @@ async function addToQueue(type: 'decompress' | 'compress') {
 async function bulkDecompress() {
   if (!currentPath.value) return
   try {
-    const resp = await api.bulkDecompress(currentPath.value, recursive.value)
+    const resp = await api.bulkDecompress(currentPath.value, penetrateSubfolders.value)
     $q.notify({
       type: 'positive',
       message: `已创建 ${resp.created} 个解压任务${resp.created > 0 ? '（每个压缩包独立一条任务）' : ''}`
@@ -220,7 +230,7 @@ async function bulkDecompress() {
 async function bulkCompress() {
   if (!currentPath.value) return
   try {
-    const resp = await api.bulkCompress(currentPath.value, recursive.value)
+    const resp = await api.bulkCompress(currentPath.value, penetrateSubfolders.value)
     $q.notify({
       type: 'positive',
       message: `已创建 ${resp.created} 个压缩任务${resp.created > 0 ? '（每个文件/文件夹独立一条任务）' : ''}`
@@ -312,14 +322,6 @@ function onRowClick(_evt: unknown, row: FsEntry) {
               :loading="submitting"
               @click="handleCompress"
             />
-          <!--
-           <q-toggle
-              v-model="recursive"
-              label="子文件夹"
-              left-label
-              dense
-            /> 
-          -->
           </div>
           <div v-if="selected.length" class="text-caption text-grey-7">
             已选 {{ selected.length }} 项

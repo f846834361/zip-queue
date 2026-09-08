@@ -56,6 +56,7 @@ export interface TaskListResponse {
 export interface AppConfig {
   max_concurrent_tasks: number
   default_browse_path: string
+  penetrate_subfolders: boolean
 }
 
 export interface BulkResponse {
@@ -80,6 +81,9 @@ export interface Password {
 export const api = {
   async getConfig(): Promise<AppConfig> {
     return (await http.get<AppConfig>('/config')).data
+  },
+  async updateConfig(body: { penetrate_subfolders: boolean }): Promise<AppConfig> {
+    return (await http.put<AppConfig>('/config', body)).data
   },
   async listDir(path?: string): Promise<ListDirResponse> {
     const params = path ? { path } : {}
@@ -127,8 +131,8 @@ export const api = {
   async deletePassword(id: number): Promise<void> {
     await http.delete(`/passwords/${id}`)
   },
-  async reorderPasswords(items: { id: number; sort_order: number }[]): Promise<void> {
-    await http.post('/passwords/reorder', { items })
+  async reorderPassword(id: number, direction: -1 | 1): Promise<void> {
+    await http.post('/passwords/reorder', { id, direction })
   }
 }
 
