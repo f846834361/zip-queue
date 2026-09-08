@@ -41,9 +41,15 @@ export interface Task {
   total_entries: number
   current_entry: string
   error: string
+  requeue_count: number
   created_at: string
   started_at: string | null
   completed_at: string | null
+}
+
+export interface RetryTaskResponse {
+  id: number
+  requeue_count: number
 }
 
 export interface TaskListResponse {
@@ -115,6 +121,9 @@ export const api = {
   },
   async deleteTask(id: number | string): Promise<void> {
     await http.delete(`/tasks/${id}`)
+  },
+  async retryTask(id: number | string): Promise<RetryTaskResponse> {
+    return (await http.post<RetryTaskResponse>(`/tasks/${id}/retry`)).data
   },
   async listPasswords(): Promise<{ items: Password[]; total: number }> {
     return (await http.get('/passwords')).data

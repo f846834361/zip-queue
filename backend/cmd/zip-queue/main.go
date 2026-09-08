@@ -35,12 +35,13 @@ func main() {
 		}
 	}()
 
-	// 启动恢复：将容器被强制结束时残留的 running 任务标记为 failed 并清理临时文件。
-	n, err := worker.RecoverOnStartup(gdb)
+	// 启动恢复：处理上次进程被强制结束时残留的 running 任务
+	// （清理临时文件 → 判定最终状态 → 可安全重做的补一条 pending 任务继续排队）。
+	recovered, requeued, err := worker.RecoverOnStartup(gdb)
 	if err != nil {
 		log.Printf("recover on startup: %v", err)
-	} else if n > 0 {
-		log.Printf("recovered %d interrupted tasks (marked failed, temp cleaned)", n)
+	} else if recovered > 0 {
+		log.Printf("recovered %d interrupted tasks (requeued %d, temp cleaned)", recovered, requeued)
 	}
 
 	runner := worker.NewRunner(gdb)

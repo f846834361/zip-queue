@@ -11,9 +11,10 @@
 # Node
 node_modules/
 frontend/dist/
+frontend/.playwright-cli
 backend/web/dist/*
 !backend/web/dist/.gitkeep
-
+frontend/main.yaml
 # Data
 /data/
 *.db
@@ -27,3 +28,4 @@ backend/web/dist/*
 # OS
 .DS_Store
 Thumbs.db
+

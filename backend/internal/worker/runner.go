@@ -82,11 +82,12 @@ func (r *Runner) runDecompress(ctx context.Context, task *model.Task) {
 	r.setTempTarget(task, tempDir, target)
 
 	if err := archive.Extract(ctx, src, tempDir, loadPasswords(r.db), r.progressFn(task)); err != nil {
-		_ = os.RemoveAll(tempDir)
 		if ctx.Err() != nil {
-			r.fail(task, classifyError(ctx.Err()))
+			// 服务停止/重启导致的中断：删除临时文件，可安全重做的补一条待执行任务
+			FinishInterrupted(r.db, task)
 			return
 		}
+		_ = os.RemoveAll(tempDir)
 		r.fail(task, classifyError(err))
 		return
 	}
@@ -140,11 +141,12 @@ func (r *Runner) runCompress(ctx context.Context, task *model.Task) {
 	r.setTempTarget(task, tempZip, target)
 
 	if err := archive.Compress(ctx, src, tempZip, r.progressFn(task)); err != nil {
-		_ = os.RemoveAll(tempZip)
 		if ctx.Err() != nil {
-			r.fail(task, classifyError(ctx.Err()))
+			// 服务停止/重启导致的中断：删除临时文件，可安全重做的补一条待执行任务
+			FinishInterrupted(r.db, task)
 			return
 		}
+		_ = os.RemoveAll(tempZip)
 		r.fail(task, classifyError(err))
 		return
 	}

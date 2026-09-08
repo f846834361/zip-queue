@@ -2,6 +2,7 @@ package api
 
 import (
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -15,6 +16,7 @@ import (
 
 	"zip-queue/internal/archive"
 	"zip-queue/internal/model"
+	"zip-queue/internal/worker"
 )
 
 type createTaskRequest struct {
@@ -330,6 +332,41 @@ func (a *API) GetTask(c *gin.Context) {
 		return
 	}
 	c.JSON(200, task)
+}
+
+// RetryTask 手动重试一个失败任务：清理临时文件、校验可重做后补一条 pending 任务。
+// 原记录保留为 failed 历史，其 error 指向新任务 id。
+func (a *API) RetryTask(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(400, gin.H{"error": "invalid id"})
+		return
+	}
+	var task model.Task
+	if err := a.db.First(&task, id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(404, gin.H{"error": "task not found"})
+			return
+		}
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	if task.Status != model.StatusFailed {
+		c.JSON(400, gin.H{"error": "只有失败的任务可以重试"})
+		return
+	}
+	nt, rerr := worker.Requeue(a.db, &task)
+	if rerr != nil {
+		c.JSON(400, gin.H{"error": rerr.Error()})
+		return
+	}
+	// 原记录保留历史，仅补充指向新任务的说明（不改动完成时间）
+	a.db.Model(&model.Task{}).Where("id = ?", task.ID).Updates(map[string]interface{}{
+		"error":     fmt.Sprintf("已手动重试，新任务 #%d", nt.ID),
+		"temp_path": "",
+	})
+	a.pool.Enqueue()
+	c.JSON(201, gin.H{"id": nt.ID, "requeue_count": nt.RequeueCount})
 }
 
 // DeleteTask 删除任务记录（仅允许已结束任务）。

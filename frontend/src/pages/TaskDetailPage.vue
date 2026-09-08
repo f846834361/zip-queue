@@ -13,6 +13,9 @@ const router = useRouter()
 const task = ref<Task | null>(null)
 const loading = ref(false)
 const error = ref('')
+const retrying = ref(false)
+// 本页只允许重试一次（刷新或重新进入页面后重置），避免重复点击创建多条重复任务
+const retried = ref(false)
 let timer: ReturnType<typeof setInterval> | null = null
 
 function formatBytes(b: number): string {
@@ -57,6 +60,7 @@ const isPending = computed(() => task.value?.status === 'pending')
 const isFinished = computed(
   () => task.value?.status === 'succeeded' || task.value?.status === 'failed'
 )
+const isFailed = computed(() => task.value?.status === 'failed')
 
 function stopPolling() {
   if (timer) {
@@ -115,6 +119,23 @@ async function deleteTask() {
   })
 }
 
+// 重试：按原类型与原路径重新创建一条待执行任务，原记录保留为历史
+async function retryTask() {
+  if (!task.value) return
+  retrying.value = true
+  try {
+    const res = await api.retryTask(task.value.id)
+    $q.notify({ type: 'positive', message: `已创建重试任务 #${res.id}` })
+    void router.push({ name: 'task-detail', params: { id: res.id } })
+  } catch (e) {
+    $q.notify({ type: 'negative', message: (e as Error).message })
+  } finally {
+    // 无论成功还是失败，本页都不再允许重复发起重试
+    retried.value = true
+    retrying.value = false
+  }
+}
+
 watch(taskId, () => {
   stopPolling()
   void loadInitial()
@@ -134,6 +155,22 @@ onBeforeUnmount(stopPolling)
         任务详情 <template v-if="task">#{{ task.id }}</template>
       </div>
       <q-space />
+      <q-btn
+        v-if="task && isFailed"
+        :color="retried ? 'grey-6' : 'primary'"
+        icon="restart_alt"
+        label="重试"
+        outline
+        no-caps
+        class="q-mr-sm"
+        :loading="retrying"
+        :disable="retried"
+        @click="retryTask"
+      >
+        <q-tooltip>
+          {{ retried ? '本页已发起重试，刷新页面后可再次重试' : '按原类型与原路径重新创建一条待执行任务' }}
+        </q-tooltip>
+      </q-btn>
       <q-btn
         v-if="task && isFinished"
         color="negative"

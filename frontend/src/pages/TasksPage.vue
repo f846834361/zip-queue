@@ -44,7 +44,6 @@ const pagination = ref({
 })
 
 const columns = [
-  { name: 'id', label: 'ID', field: 'id', align: 'left' as const, sortable: true },
   { name: 'type', label: '类型', field: 'type', align: 'left' as const },
   { name: 'source_path', label: '源路径', field: 'source_path', align: 'left' as const },
   { name: 'status', label: '状态', field: 'status', align: 'left' as const },
