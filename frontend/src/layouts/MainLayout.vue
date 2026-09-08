@@ -1,12 +1,13 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted } from 'vue'
 import { useQuasar } from 'quasar'
-import api, { type AppConfig } from '../api'
 import { useUiStore } from '../stores/ui'
+import { useBrowseStore } from '../stores/browse'
 
 const $q = useQuasar()
 
 const ui = useUiStore()
+const browse = useBrowseStore()
 // 首次进入且无持久化记录时，按平台默认（桌面打开 / 移动端收起）
 ui.initDrawer($q.platform.is.desktop)
 const leftDrawerOpen = computed({
@@ -14,7 +15,8 @@ const leftDrawerOpen = computed({
   set: (open: boolean) => ui.setLeftDrawerOpen(open)
 })
 
-const config = ref<AppConfig | null>(null)
+// 配置由 browse store 缓存，与文件页共享同一次请求
+const config = computed(() => browse.config)
 
 const links = computed(() => [
   { to: '/', label: '文件浏览', icon: 'folder_open' },
@@ -24,7 +26,7 @@ const links = computed(() => [
 
 onMounted(async () => {
   try {
-    config.value = await api.getConfig()
+    await browse.ensureConfig()
   } catch (e) {
     $q.notify({ type: 'negative', message: (e as Error).message })
   }

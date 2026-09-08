@@ -3,6 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import { useQuasar } from 'quasar'
 import api, { type AppConfig, type FsEntry } from '../api'
 import { useBrowseStore } from '../stores/browse'
+import { formatDateTime, formatSize } from '../utils/format'
 
 const $q = useQuasar()
 const browseStore = useBrowseStore()
@@ -12,7 +13,8 @@ const currentPath = ref('')
 const manualPath = ref('')
 const entries = ref<FsEntry[]>([])
 const loading = ref(false)
-const selected = ref<string[]>([])
+// 用 Set 保存选中路径：勾选态查找 O(1)，避免大目录下 O(n·m) 的 includes 扫描
+const selected = ref<Set<string>>(new Set())
 const submitting = ref(false)
 
 // 是否穿透子文件夹，来自配置页的全局开关（默认关闭）
@@ -25,24 +27,9 @@ const columns = [
   { name: 'mod_time', label: '修改时间', field: 'mod_time', align: 'left' as const, sortable: true }
 ]
 
-function formatSize(bytes: number, isDir: boolean): string {
-  if (isDir) return '—'
-  if (!bytes) return '0 B'
-  const units = ['B', 'KB', 'MB', 'GB', 'TB']
-  const i = Math.floor(Math.log(bytes) / Math.log(1024))
-  return `${(bytes / Math.pow(1024, i)).toFixed(1)} ${units[i]}`
-}
-
-function formatDate(s: string): string {
-  if (!s) return '—'
-  const d = new Date(s)
-  if (Number.isNaN(d.getTime())) return s
-  return d.toLocaleString()
-}
-
 async function load(path?: string) {
   loading.value = true
-  selected.value = []
+  selected.value = new Set()
   try {
     const resp = await api.listDir(path)
     currentPath.value = resp.path
@@ -88,8 +75,25 @@ function submitManualPath() {
 }
 
 const selectedEntries = computed(() =>
-  entries.value.filter((e) => selected.value.includes(e.path))
+  entries.value.filter((e) => selected.value.has(e.path))
 )
+const selectedCount = computed(() => selected.value.size)
+
+// 面包屑分段：Windows/Unix 分隔符都兼容，逐级累加完整路径供点击跳转
+const breadcrumbSegments = computed(() => {
+  const p = currentPath.value
+  if (!p) return [] as { label: string; path: string }[]
+  const sep = p.includes('/') ? '/' : '\\'
+  const segs: { label: string; path: string }[] = []
+  for (const part of p.split(/[\\/]/).filter(Boolean)) {
+    const prev = segs.length ? segs[segs.length - 1].path : ''
+    segs.push({
+      label: part,
+      path: prev ? prev + sep + part : p.startsWith('/') ? '/' + part : part
+    })
+  }
+  return segs
+})
 
 const canDecompress = computed(() =>
   selectedEntries.value.some((e) => e.is_archive)
@@ -123,7 +127,7 @@ async function handleDecompress() {
   if (submitting.value) return
   submitting.value = true
   try {
-    if (selected.value.length > 0) {
+    if (selected.value.size > 0) {
       const archives = selectedEntries.value.filter((e) => e.is_archive)
       if (archives.length === 0) return
       const go = await confirmAction(
@@ -154,7 +158,7 @@ async function handleCompress() {
   if (submitting.value) return
   submitting.value = true
   try {
-    if (selected.value.length > 0) {
+    if (selected.value.size > 0) {
       const items = selectedEntries.value.filter((e) => !e.is_archive)
       if (items.length === 0) return
       const go = await confirmAction(
@@ -208,7 +212,7 @@ async function addToQueue(type: 'decompress' | 'compress') {
       type: 'positive',
       message: `已创建 ${resp.created} 个${type === 'decompress' ? '解压' : '压缩'}任务${ignored}`
     })
-    selected.value = []
+    selected.value = new Set()
   } catch (e) {
     $q.notify({ type: 'negative', message: (e as Error).message })
   }
@@ -218,9 +222,10 @@ async function bulkDecompress() {
   if (!currentPath.value) return
   try {
     const resp = await api.bulkDecompress(currentPath.value, penetrateSubfolders.value)
+    const skipped = resp.skipped ? `，跳过 ${resp.skipped} 个已在进行中的压缩包` : ''
     $q.notify({
       type: 'positive',
-      message: `已创建 ${resp.created} 个解压任务${resp.created > 0 ? '（每个压缩包独立一条任务）' : ''}`
+      message: `已创建 ${resp.created} 个解压任务${resp.created > 0 ? '（每个压缩包独立一条任务）' : ''}${skipped}`
     })
   } catch (e) {
     $q.notify({ type: 'negative', message: (e as Error).message })
@@ -231,9 +236,10 @@ async function bulkCompress() {
   if (!currentPath.value) return
   try {
     const resp = await api.bulkCompress(currentPath.value, penetrateSubfolders.value)
+    const skipped = resp.skipped ? `，跳过 ${resp.skipped} 个已在进行中的项` : ''
     $q.notify({
       type: 'positive',
-      message: `已创建 ${resp.created} 个压缩任务${resp.created > 0 ? '（每个文件/文件夹独立一条任务）' : ''}`
+      message: `已创建 ${resp.created} 个压缩任务${resp.created > 0 ? '（每个文件/文件夹独立一条任务）' : ''}${skipped}`
     })
   } catch (e) {
     $q.notify({ type: 'negative', message: (e as Error).message })
@@ -242,7 +248,8 @@ async function bulkCompress() {
 
 onMounted(async () => {
   try {
-    config.value = await api.getConfig()
+    // 配置由 browse store 缓存，与 MainLayout 共享同一次请求
+    config.value = await browseStore.ensureConfig()
   } catch (e) {
     $q.notify({ type: 'negative', message: (e as Error).message })
   }
@@ -253,6 +260,10 @@ onMounted(async () => {
 
 function onRowClick(_evt: unknown, row: FsEntry) {
   openDir(row)
+}
+
+function onUpdateSelected(val: readonly FsEntry[]) {
+  selected.value = new Set(val.map((e) => e.path))
 }
 </script>
 
@@ -279,11 +290,7 @@ function onRowClick(_evt: unknown, row: FsEntry) {
       <q-card-section class="q-pt-md">
         <q-breadcrumbs gutter="sm" class="text-body2">
           <q-breadcrumbs-el
-            v-for="(seg, idx) in currentPath.split(/[\\/]/).filter(Boolean).reduce((acc: {label:string,path:string}[], part) => {
-              const prev = acc.length ? acc[acc.length-1].path : ''
-              acc.push({ label: part, path: prev ? prev + (currentPath.includes('/') ? '/' : '\\') + part : (currentPath.startsWith('/') ? '/' + part : part) })
-              return acc
-            }, [])"
+            v-for="(seg, idx) in breadcrumbSegments"
             :key="idx"
             :label="seg.label"
             icon="folder"
@@ -303,28 +310,28 @@ function onRowClick(_evt: unknown, row: FsEntry) {
             <q-btn
               color="primary"
               icon="unarchive"
-              :label="selected.length ? '解压' : '解压全部'"
+              :label="selectedCount ? '解压' : '解压全部'"
               unelevated
               no-caps
               dense
-              :disable="submitting || (selected.length > 0 && !canDecompress)"
+              :disable="submitting || (selectedCount > 0 && !canDecompress)"
               :loading="submitting"
               @click="handleDecompress"
             />
             <q-btn
               color="secondary"
               icon="archive"
-              :label="selected.length ? '压缩' : '压缩全部'"
+              :label="selectedCount ? '压缩' : '压缩全部'"
               unelevated
               no-caps
               dense
-              :disable="submitting || (selected.length > 0 && !canCompress)"
+              :disable="submitting || (selectedCount > 0 && !canCompress)"
               :loading="submitting"
               @click="handleCompress"
             />
           </div>
-          <div v-if="selected.length" class="text-caption text-grey-7">
-            已选 {{ selected.length }} 项
+          <div v-if="selectedCount" class="text-caption text-grey-7">
+            已选 {{ selectedCount }} 项
           </div>
         </div>
       </q-card-section>
@@ -337,9 +344,12 @@ function onRowClick(_evt: unknown, row: FsEntry) {
           row-key="path"
           :pagination="{ rowsPerPage: 0 }"
           selection="multiple"
-          :selected="entries.filter((e) => selected.includes(e.path))"
-          @update:selected="(val) => { selected = val.map((e: FsEntry) => e.path) }"
+          :selected="selectedEntries"
+          @update:selected="onUpdateSelected"
           @row-click="onRowClick"
+          virtual-scroll
+          :virtual-scroll-slice-size="50"
+          style="max-height: 65vh"
           hide-pagination
           flat
         >
@@ -378,7 +388,7 @@ function onRowClick(_evt: unknown, row: FsEntry) {
             </q-td>
           </template>
           <template #body-cell-mod_time="props">
-            <q-td :props="props">{{ formatDate(props.row.mod_time) }}</q-td>
+            <q-td :props="props">{{ formatDateTime(props.row.mod_time) }}</q-td>
           </template>
           <template #no-data>
             <div class="full-width text-center text-grey q-pa-md">目录为空</div>

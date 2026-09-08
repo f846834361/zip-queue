@@ -15,7 +15,7 @@ import (
 var ErrPasswordRequired = fmt.Errorf("zip is encrypted but no matching password found")
 
 // extractZip 解压 zip 到 targetDir，应用智能合并；支持加密 zip（按密码列表顺序尝试）。
-func extractZip(ctx context.Context, src, targetDir string, passwords []string, p ProgressFn) error {
+func extractZip(ctx context.Context, src, targetDir string, passwords []string, limits Limits, p ProgressFn) error {
 	if err := os.MkdirAll(targetDir, 0o755); err != nil {
 		return fmt.Errorf("mkdir target: %w", err)
 	}
@@ -58,6 +58,9 @@ func extractZip(ctx context.Context, src, targetDir string, passwords []string, 
 			totalEntries++
 		}
 	}
+	if limits.MaxTotalBytes > 0 && totalBytes > limits.MaxTotalBytes {
+		return fmt.Errorf("%w：压缩包解压后约 %d 字节，超过上限 %d", ErrLimitExceeded, totalBytes, limits.MaxTotalBytes)
+	}
 	t := newTracker(totalBytes, totalEntries, p)
 
 	for _, f := range r.File {
@@ -96,11 +99,19 @@ func extractZip(ctx context.Context, src, targetDir string, passwords []string, 
 			return err
 		}
 		cw := &countWriter{w: out, t: t}
-		_, copyErr := io.Copy(cw, rc)
+		// 单条目可写字节数 = 剩余额度（未配置上限时 -1 表示不限）
+		maxBytes := int64(-1)
+		if limits.MaxTotalBytes > 0 {
+			maxBytes = limits.MaxTotalBytes - t.processedBytes
+		}
+		_, copyErr := copyWithLimit(ctx, cw, rc, maxBytes)
+		closeErr := out.Close()
 		rc.Close()
-		out.Close()
 		if copyErr != nil {
 			return copyErr
+		}
+		if closeErr != nil {
+			return fmt.Errorf("close %q: %w", dest, closeErr)
 		}
 		_ = os.Chmod(dest, f.Mode().Perm())
 		t.entryDone()
@@ -177,9 +188,13 @@ func Compress(ctx context.Context, src, destZip string, p ProgressFn) error {
 	if err != nil {
 		return err
 	}
-	defer out.Close()
 	zw := zip.NewWriter(out)
-	defer zw.Close()
+	// 兜底关闭：保证任意失败路径都释放句柄（Windows 上未关闭的句柄会阻止临时文件清理）。
+	// 成功路径在函数尾部已显式 Close 并检查错误，此处重复 Close 的错误可忽略。
+	defer func() {
+		_ = zw.Close()
+		_ = out.Close()
+	}()
 
 	t := newTracker(totalBytes, len(files), p)
 	for _, fpath := range files {
@@ -211,7 +226,7 @@ func Compress(ctx context.Context, src, destZip string, p ProgressFn) error {
 			return err
 		}
 		cw := &countWriter{w: w, t: t}
-		_, copyErr := io.Copy(cw, f)
+		_, copyErr := copyWithLimit(ctx, cw, f, -1)
 		f.Close()
 		if copyErr != nil {
 			return copyErr
@@ -219,5 +234,13 @@ func Compress(ctx context.Context, src, destZip string, p ProgressFn) error {
 		t.entryDone()
 	}
 	t.notify(true)
+	// 依次关闭 zip writer 与文件句柄：Close 负责 flush deflate 缓冲并写入
+	// central directory，错误不可忽略，否则磁盘满时截断的 zip 会被判成功。
+	if err := zw.Close(); err != nil {
+		return fmt.Errorf("write zip: %w", err)
+	}
+	if err := out.Close(); err != nil {
+		return fmt.Errorf("close zip file: %w", err)
+	}
 	return nil
 }

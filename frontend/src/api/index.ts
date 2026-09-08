@@ -68,6 +68,8 @@ export interface AppConfig {
 export interface BulkResponse {
   created: number
   ids: number[]
+  // 与已有进行中任务同源被跳过的数量
+  skipped?: number
 }
 
 export interface BatchCreateResponse extends BulkResponse {

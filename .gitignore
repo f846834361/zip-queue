@@ -24,6 +24,8 @@ frontend/main.yaml
 
 # IDE
 .idea/
+.vscode/
+.trae/
 
 # OS
 .DS_Store

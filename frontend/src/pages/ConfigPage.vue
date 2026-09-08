@@ -2,8 +2,10 @@
 import { onMounted, ref } from 'vue'
 import { useQuasar } from 'quasar'
 import api, { type Password } from '../api'
+import { useBrowseStore } from '../stores/browse'
 
 const $q = useQuasar()
+const browseStore = useBrowseStore()
 
 const passwords = ref<Password[]>([])
 const loading = ref(false)
@@ -17,7 +19,7 @@ const savingPenetrate = ref(false)
 
 async function loadConfig() {
   try {
-    const cfg = await api.getConfig()
+    const cfg = await browseStore.ensureConfig()
     // 仅当后端明确返回 true 才视为开启；undefined/null 一律按关闭（默认否），
     // 避免赋值为 undefined 导致 q-toggle 显示成"中间"态
     penetrateSubfolders.value = cfg.penetrate_subfolders === true
@@ -31,7 +33,8 @@ async function savePenetrate(val: boolean) {
   const prev = penetrateSubfolders.value
   savingPenetrate.value = true
   try {
-    await api.updateConfig({ penetrate_subfolders: val })
+    const cfg = await api.updateConfig({ penetrate_subfolders: val })
+    browseStore.setConfig(cfg)
     $q.notify({
       type: 'positive',
       message: val ? '已开启穿透文件夹' : '已关闭穿透文件夹'

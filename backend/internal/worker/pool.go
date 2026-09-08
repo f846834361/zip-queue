@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"errors"
+	"log"
 	"sync"
 	"time"
 
@@ -66,6 +67,9 @@ func (p *Pool) loop(ctx context.Context) {
 
 // dispatch 尽量填满空闲并发槽：每个槽认领一个 pending 任务并交给 worker。
 func (p *Pool) dispatch(ctx context.Context) {
+	if ctx.Err() != nil {
+		return
+	}
 	for {
 		// 尝试获取一个并发槽（非阻塞）
 		select {
@@ -113,6 +117,14 @@ func (p *Pool) dispatch(ctx context.Context) {
 			<-p.sem
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return
+			}
+			// 认领成功但读取失败：回滚为 pending，避免任务卡在 running 直到重启
+			if uerr := p.db.WithContext(context.WithoutCancel(ctx)).
+				Model(&model.Task{}).
+				Where("id = ? AND status = ?", task.ID, model.StatusRunning).
+				Updates(map[string]interface{}{"status": model.StatusPending}).
+				Error; uerr != nil {
+				log.Printf("任务 #%d 认领后回滚失败，将保持 running 直至重启恢复：%v", task.ID, uerr)
 			}
 			return
 		}

@@ -40,6 +40,10 @@ func (a *API) CreateTask(c *gin.Context) {
 		c.JSON(400, gin.H{"error": reason})
 		return
 	}
+	if a.hasActiveTask(req.Type, req.Path) {
+		c.JSON(409, gin.H{"error": "该路径已存在进行中（待处理/执行中）的同类型任务"})
+		return
+	}
 	if err := a.db.Create(task).Error; err != nil {
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
@@ -81,6 +85,47 @@ func (a *API) insertTasks(tasks []model.Task) ([]uint, error) {
 		ids = append(ids, tasks[i].ID)
 	}
 	return ids, nil
+}
+
+// hasActiveTask 判断同类型、同源路径的任务是否已存在且尚未结束（pending/running）。
+// 查询出错时按"无重复"处理，不阻塞任务创建。
+func (a *API) hasActiveTask(taskType, path string) bool {
+	kept, _ := a.filterActivePaths(taskType, []string{path})
+	_, ok := kept[path]
+	return !ok
+}
+
+// filterActivePaths 过滤掉已存在 pending/running 同源同类型任务的路径，
+// 返回保留路径集合与跳过数量。查询出错时按"无重复"处理。
+func (a *API) filterActivePaths(taskType string, paths []string) (map[string]struct{}, int) {
+	kept := make(map[string]struct{}, len(paths))
+	for _, p := range paths {
+		kept[p] = struct{}{}
+	}
+	active := []string{}
+	// 分批查询，避免 SQLite 绑定参数数量超限
+	for i := 0; i < len(paths); i += 500 {
+		end := i + 500
+		if end > len(paths) {
+			end = len(paths)
+		}
+		var batch []string
+		if err := a.db.Model(&model.Task{}).
+			Where("type = ? AND status IN ? AND source_path IN ?", taskType,
+				[]string{model.StatusPending, model.StatusRunning}, paths[i:end]).
+			Pluck("source_path", &batch).Error; err != nil {
+			return kept, 0
+		}
+		active = append(active, batch...)
+	}
+	skipped := 0
+	for _, p := range active {
+		if _, ok := kept[p]; ok {
+			delete(kept, p)
+			skipped++
+		}
+	}
+	return kept, skipped
 }
 
 type createTasksBatchRequest struct {
@@ -128,6 +173,24 @@ func (a *API) CreateTasksBatch(c *gin.Context) {
 		c.JSON(400, gin.H{"error": msg})
 		return
 	}
+	// 过滤已有进行中任务的路径，避免同源任务并发执行互相冲突
+	paths := make([]string, 0, len(tasks))
+	for _, t := range tasks {
+		paths = append(paths, t.SourcePath)
+	}
+	kept, dupSkipped := a.filterActivePaths(req.Type, paths)
+	if len(kept) == 0 {
+		c.JSON(409, gin.H{"error": "所选内容均已存在进行中的任务"})
+		return
+	}
+	filtered := make([]model.Task, 0, len(kept))
+	for _, t := range tasks {
+		if _, ok := kept[t.SourcePath]; ok {
+			filtered = append(filtered, t)
+		}
+	}
+	tasks = filtered
+	skipped += dupSkipped
 	ids, err := a.insertTasks(tasks)
 	if err != nil {
 		c.JSON(500, gin.H{"error": err.Error()})
@@ -164,6 +227,10 @@ func (a *API) BulkDecompress(c *gin.Context) {
 			return werr
 		}
 		if d.IsDir() {
+			// 跳过任务执行期的临时目录，避免扫到运行中任务的产物
+			if strings.HasPrefix(d.Name(), worker.TempDirPrefix) {
+				return filepath.SkipDir
+			}
 			if !recursive && p != req.Path {
 				return filepath.SkipDir
 			}
@@ -181,9 +248,21 @@ func (a *API) BulkDecompress(c *gin.Context) {
 	sort.Slice(archives, func(i, j int) bool {
 		return strings.ToLower(archives[i]) < strings.ToLower(archives[j])
 	})
-	tasks := make([]model.Task, 0, len(archives))
+	if len(archives) == 0 {
+		c.JSON(400, gin.H{"error": "所选目录下没有可解压的压缩包"})
+		return
+	}
+	// 过滤已有进行中任务的压缩包，避免同源任务并发执行互相冲突
+	kept, dupSkipped := a.filterActivePaths(model.TypeDecompress, archives)
+	tasks := make([]model.Task, 0, len(kept))
 	for _, arc := range archives {
-		tasks = append(tasks, model.Task{Type: model.TypeDecompress, SourcePath: arc, Status: model.StatusPending})
+		if _, ok := kept[arc]; ok {
+			tasks = append(tasks, model.Task{Type: model.TypeDecompress, SourcePath: arc, Status: model.StatusPending})
+		}
+	}
+	if len(tasks) == 0 {
+		c.JSON(409, gin.H{"error": "所选目录下的压缩包均已存在进行中的任务"})
+		return
 	}
 	ids, err := a.insertTasks(tasks)
 	if err != nil {
@@ -191,7 +270,7 @@ func (a *API) BulkDecompress(c *gin.Context) {
 		return
 	}
 	a.pool.Enqueue()
-	c.JSON(201, gin.H{"created": len(ids), "ids": ids})
+	c.JSON(201, gin.H{"created": len(ids), "ids": ids, "skipped": dupSkipped})
 }
 
 // BulkCompress 扫描文件夹下的非压缩包条目，每个创建独立压缩任务。
@@ -220,25 +299,23 @@ func (a *API) BulkCompress(c *gin.Context) {
 		if p == req.Path {
 			return nil
 		}
+		// 跳过任务执行期的临时目录，避免扫到运行中任务的产物
+		if d.IsDir() && strings.HasPrefix(d.Name(), worker.TempDirPrefix) {
+			return filepath.SkipDir
+		}
 		// 压缩包本身不压缩
 		if !d.IsDir() && archive.IsSupportedArchive(p) {
 			return nil
 		}
-		if !recursive {
-			// 非递归：当前目录下所有非压缩包项目（文件夹+文件）都压缩
-			if !d.IsDir() {
-				// 空文件不压缩
-				if fi, err := d.Info(); err != nil || fi.Size() == 0 {
-					return nil
-				}
-			}
-			targets = append(targets, p)
-			return filepath.SkipDir // 不进入子目录
-		}
-		// 递归：只压缩文件，不压缩文件夹本身
 		if d.IsDir() {
-			return nil // 继续进入子目录
+			if recursive {
+				return nil // 递归：继续进入子目录，文件夹本身不压缩
+			}
+			// 非递归：文件夹本身作为压缩对象，不进入子目录
+			targets = append(targets, p)
+			return filepath.SkipDir
 		}
+		// 空文件不压缩
 		if fi, err := d.Info(); err != nil || fi.Size() == 0 {
 			return nil
 		}
@@ -252,9 +329,21 @@ func (a *API) BulkCompress(c *gin.Context) {
 	sort.Slice(targets, func(i, j int) bool {
 		return strings.ToLower(targets[i]) < strings.ToLower(targets[j])
 	})
-	tasks := make([]model.Task, 0, len(targets))
+	if len(targets) == 0 {
+		c.JSON(400, gin.H{"error": "所选目录下没有可压缩的条目"})
+		return
+	}
+	// 过滤已有进行中任务的路径，避免同源任务并发执行互相冲突
+	kept, dupSkipped := a.filterActivePaths(model.TypeCompress, targets)
+	tasks := make([]model.Task, 0, len(kept))
 	for _, t := range targets {
-		tasks = append(tasks, model.Task{Type: model.TypeCompress, SourcePath: t, Status: model.StatusPending})
+		if _, ok := kept[t]; ok {
+			tasks = append(tasks, model.Task{Type: model.TypeCompress, SourcePath: t, Status: model.StatusPending})
+		}
+	}
+	if len(tasks) == 0 {
+		c.JSON(409, gin.H{"error": "所选目录下的条目均已存在进行中的任务"})
+		return
 	}
 	ids, err := a.insertTasks(tasks)
 	if err != nil {
@@ -262,7 +351,7 @@ func (a *API) BulkCompress(c *gin.Context) {
 		return
 	}
 	a.pool.Enqueue()
-	c.JSON(201, gin.H{"created": len(ids), "ids": ids})
+	c.JSON(201, gin.H{"created": len(ids), "ids": ids, "skipped": dupSkipped})
 }
 
 // ListTasks 分页 + 筛选任务列表。

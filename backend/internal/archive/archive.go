@@ -46,20 +46,37 @@ func IsSupportedArchive(path string) bool {
 	return Detect(path) != KindUnknown
 }
 
+// Limits 约束单次解压的资源消耗（零值 = 不限制）。
+type Limits struct {
+	// MaxTotalBytes 单任务解压总字节上限（zip bomb 防护），0 表示不限制。
+	MaxTotalBytes int64
+}
+
 // Extract 解压 src 到 targetDir。智能合并：若压缩包仅含单一顶层目录，
 // 其内容直接并入 targetDir（避免双层嵌套）。passwords 用于加密 zip 的轮询尝试。
-func Extract(ctx context.Context, src, targetDir string, passwords []string, p ProgressFn) error {
+func Extract(ctx context.Context, src, targetDir string, passwords []string, limits Limits, p ProgressFn) error {
 	switch Detect(src) {
 	case KindZip:
-		return extractZip(ctx, src, targetDir, passwords, p)
+		return extractZip(ctx, src, targetDir, passwords, limits, p)
 	case KindTar:
-		return extractTar(ctx, src, targetDir, p, false)
+		return extractTar(ctx, src, targetDir, limits, p, false)
 	case KindTarGz:
-		return extractTar(ctx, src, targetDir, p, true)
+		return extractTar(ctx, src, targetDir, limits, p, true)
 	case KindGzip:
-		return extractGzipSingle(ctx, src, targetDir, p)
+		return extractGzipSingle(ctx, src, targetDir, limits, p)
 	}
 	return ErrUnsupportedFormat
+}
+
+// StripArchiveExt 去除压缩包扩展名（长后缀优先、大小写不敏感，保留原名大小写）。
+func StripArchiveExt(name string) string {
+	lower := strings.ToLower(name)
+	for _, ext := range ArchiveExtensions {
+		if strings.HasSuffix(lower, ext) {
+			return name[:len(name)-len(ext)]
+		}
+	}
+	return name
 }
 
 // entryMeta 描述压缩包内单个条目的元信息（扫描阶段产出）。

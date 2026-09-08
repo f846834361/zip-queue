@@ -27,10 +27,12 @@ func Run(ctx context.Context, cfg *config.Config, gdb *gorm.DB, pool *worker.Poo
 	r.NoRoute(serveSPA)
 
 	srv := &http.Server{
-		Addr:         fmt.Sprintf(":%d", cfg.Server.Port),
-		Handler:      r,
-		ReadTimeout:  cfg.Server.ReadTimeout,
-		WriteTimeout: cfg.Server.WriteTimeout,
+		Addr:              fmt.Sprintf(":%d", cfg.Server.Port),
+		Handler:           r,
+		ReadTimeout:       cfg.Server.ReadTimeout,
+		WriteTimeout:      cfg.Server.WriteTimeout,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	go func() {
@@ -47,6 +49,7 @@ func Run(ctx context.Context, cfg *config.Config, gdb *gorm.DB, pool *worker.Poo
 }
 
 // serveSPA 提供嵌入的前端静态资源；未命中则回退到 index.html（SPA 路由）。
+// Vite 产物文件名带内容 hash，可长缓存；index.html 与路由回退必须 no-cache。
 func serveSPA(c *gin.Context) {
 	p := strings.TrimPrefix(c.Request.URL.Path, "/")
 	if p == "" {
@@ -60,6 +63,14 @@ func serveSPA(c *gin.Context) {
 			c.String(http.StatusNotFound, "frontend not built")
 			return
 		}
+		c.Header("Cache-Control", "no-cache")
+		c.Data(http.StatusOK, contentType("index.html"), data)
+		return
+	}
+	if p == "index.html" {
+		c.Header("Cache-Control", "no-cache")
+	} else {
+		c.Header("Cache-Control", "public, max-age=31536000, immutable")
 	}
 	c.Data(http.StatusOK, contentType(target), data)
 }

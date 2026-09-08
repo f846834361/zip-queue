@@ -7,7 +7,9 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
+	"zip-queue/internal/archive"
 	"zip-queue/internal/config"
 	"zip-queue/internal/db"
 	"zip-queue/internal/server"
@@ -44,7 +46,7 @@ func main() {
 		log.Printf("recovered %d interrupted tasks (requeued %d, temp cleaned)", recovered, requeued)
 	}
 
-	runner := worker.NewRunner(gdb)
+	runner := worker.NewRunner(gdb, archive.Limits{MaxTotalBytes: cfg.Worker.MaxExtractTotalBytes})
 	pool := worker.NewPool(gdb, runner, cfg.Worker.MaxConcurrentTasks)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -63,6 +65,17 @@ func main() {
 	if err := server.Run(ctx, cfg, gdb, pool); err != nil {
 		log.Fatalf("server: %v", err)
 	}
-	pool.Wait()
+	// 等待进行中的任务收尾；大文件拷贝无法立即打断，超时则放弃等待，
+	// 残留 running 任务由下次启动的 RecoverOnStartup 兜底恢复。
+	done := make(chan struct{})
+	go func() {
+		pool.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		log.Println("warning: workers 未在 30s 内收尾，强制退出")
+	}
 	log.Println("zip-queue stopped")
 }
