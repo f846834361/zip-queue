@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 import { useQuasar, QInput } from 'quasar'
 import api, { type AppConfig, type FsEntry } from '../api'
 import { useBrowseStore } from '../stores/browse'
@@ -16,6 +16,14 @@ const loading = ref(false)
 // 用 Set 保存选中路径：勾选态查找 O(1)，避免大目录下 O(n·m) 的 includes 扫描
 const selected = ref<Set<string>>(new Set())
 const submitting = ref(false)
+
+// 轻量级轮询：每 5 秒请求一次后端 file/status，用目录 mtime 判断是否需要刷新列表
+const POLL_INTERVAL_MS = 5000
+let pollTimer: ReturnType<typeof setInterval> | null = null
+// 当前目录 mtime 基线；与轮询返回的 modified 不一致即刷新
+const currentModified = ref(0)
+// 当前路径下进行中的任务数，仅用于 UI 提示
+const activeCount = ref(0)
 
 // 地址栏编辑态：true 时显示可输入路径输入框，false 时显示面包屑导航。
 const editing = ref(false)
@@ -67,12 +75,40 @@ async function load(path?: string) {
     manualPath.value = resp.path
     entries.value = resp.entries
     browseStore.setPath(resp.path)
+    currentModified.value = resp.modified || 0
+    activeCount.value = 0
+    startPolling()
   } catch (e) {
-    $q.notify({ type: 'negative', message: (e as Error).message })
+    $q.notify({ type: 'negative',  message: (e as Error).message })
   } finally {
     loading.value = false
   }
 }
+
+// 启动/重启轮询定时器（导航到新目录时重置基线并重新计时）
+function startPolling() {
+  if (pollTimer !== null) clearInterval(pollTimer)
+  pollTimer = setInterval(pollOnce, POLL_INTERVAL_MS)
+}
+
+// 单次轮询：对比目录 mtime 决定是否刷新；轮询静默失败不干扰用户
+async function pollOnce() {
+  if (!currentPath.value) return
+  try {
+    const resp = await api.getFileStatus(currentPath.value)
+    activeCount.value = resp.active_count
+    if (resp.modified > 0 && resp.modified !== currentModified.value) {
+      currentModified.value = resp.modified
+      await load(currentPath.value)
+    }
+  } catch {
+    // 轮询错误静默忽略
+  }
+}
+
+onUnmounted(() => {
+  if (pollTimer !== null) clearInterval(pollTimer)
+})
 
 function parentPath(p: string): string | null {
   if (!p || p === '/' || p === '' ) return null
@@ -330,6 +366,16 @@ function onUpdateSelected(val: readonly FsEntry[]) {
               @blur="commitEdit"
             />
           </div>
+          <q-chip
+            v-if="activeCount > 0"
+            dense
+            color="blue-3"
+            text-color="black"
+            icon="sync"
+            class="q-ml-sm"
+          >
+            {{ activeCount }} 个后台任务进行中
+          </q-chip>
           <q-btn color="secondary" icon="arrow_upward" label="上级" outline @click="goUp" />
           <q-btn color="grey-7" icon="refresh" label="刷新" flat @click="load(currentPath)" />
         </div>

@@ -22,17 +22,18 @@ type Entry struct {
 
 // List 列出给定目录的子项（目录在前，按名称不区分大小写排序）。
 // 跳过本服务产生的临时目录（前缀 .zq-tmp-）。
-func List(path string) ([]Entry, error) {
+// 返回目录项列表、该目录自身的最后修改时间，以及可能的错误。
+func List(path string) ([]Entry, time.Time, error) {
 	info, err := os.Stat(path)
 	if err != nil {
-		return nil, err
+		return nil, time.Time{}, err
 	}
 	if !info.IsDir() {
-		return nil, &NotDirError{Path: path}
+		return nil, time.Time{}, &NotDirError{Path: path}
 	}
 	dirEntries, err := os.ReadDir(path)
 	if err != nil {
-		return nil, err
+		return nil, time.Time{}, err
 	}
 	out := make([]Entry, 0, len(dirEntries))
 	for _, de := range dirEntries {
@@ -63,7 +64,7 @@ func List(path string) ([]Entry, error) {
 		}
 		return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name)
 	})
-	return out, nil
+	return out, info.ModTime(), nil
 }
 
 // NotDirError 在给定路径不是目录时返回。

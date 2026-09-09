@@ -22,6 +22,7 @@ func Register(r *gin.RouterGroup, gdb *gorm.DB, pool *worker.Pool, cfg *config.C
 	r.GET("/config", a.Config)
 	r.PUT("/config", a.UpdateConfig)
 	r.GET("/fs/list", a.ListDir)
+	r.GET("/file/status", a.FileStatus)
 	r.POST("/tasks", a.CreateTask)
 	r.POST("/tasks/batch", a.CreateTasksBatch)
 	r.POST("/tasks/bulk-decompress-folder", a.BulkDecompress)
