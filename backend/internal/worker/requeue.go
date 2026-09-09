@@ -2,6 +2,7 @@ package worker
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"time"
 
@@ -105,7 +106,9 @@ func finishInterrupted(db *gorm.DB, id uint, status, errMsg string, succeeded bo
 	} else {
 		updates["error"] = truncate(errMsg, 2048)
 	}
-	db.Model(&model.Task{}).Where("id = ?", id).Updates(updates)
+	if err := db.Model(&model.Task{}).Where("id = ?", id).Updates(updates).Error; err != nil {
+		log.Printf("任务 #%d 中断收尾状态落库失败，将保持 running 直至重启恢复：%v", id, err)
+	}
 }
 
 func pathExists(p string) bool {

@@ -15,6 +15,20 @@ type passwordRequest struct {
 	Enabled   *bool  `json:"enabled"`
 }
 
+// passwordExists 判断 value 是否已被占用；excludeID 非 0 时排除该记录（用于更新自身）。
+// 密码按字面量尝试解压，故区分大小写；停用密码同样参与校验（重复条目没有意义）。
+func (a *API) passwordExists(value string, excludeID uint) (bool, error) {
+	q := a.db.Model(&model.Password{}).Where("value = ?", value)
+	if excludeID != 0 {
+		q = q.Where("id != ?", excludeID)
+	}
+	var count int64
+	if err := q.Count(&count).Error; err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
 // ListPasswords 返回全部密码，按 sort_order asc、id asc 排序。
 func (a *API) ListPasswords(c *gin.Context) {
 	var items []model.Password
@@ -32,6 +46,17 @@ func (a *API) CreatePassword(c *gin.Context) {
 		c.JSON(400, gin.H{"error": err.Error()})
 		return
 	}
+	// 重复校验：同一密码只允许存在一条
+	exists, err := a.passwordExists(req.Value, 0)
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	if exists {
+		c.JSON(400, gin.H{"error": "该密码已存在，请勿重复添加"})
+		return
+	}
+
 	pw := &model.Password{Value: req.Value, Note: req.Note, Enabled: true}
 	if req.Enabled != nil {
 		pw.Enabled = *req.Enabled
@@ -62,6 +87,16 @@ func (a *API) UpdatePassword(c *gin.Context) {
 	var req passwordRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(400, gin.H{"error": err.Error()})
+		return
+	}
+	// 重复校验：排除自身，避免仅修改备注时误判为重复
+	exists, err := a.passwordExists(req.Value, uint(id))
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	if exists {
+		c.JSON(400, gin.H{"error": "该密码已存在，请勿重复添加"})
 		return
 	}
 	updates := map[string]interface{}{

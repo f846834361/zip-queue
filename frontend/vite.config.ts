@@ -33,5 +33,19 @@ export default defineConfig({
         changeOrigin: true
       }
     }
+  },
+  build: {
+    rollupOptions: {
+      output: {
+        // 拆分 vendor：业务代码迭代时框架依赖仍命中浏览器缓存
+        manualChunks(id: string) {
+          if (!id.includes('node_modules')) return undefined
+          if (/[\\/]node_modules[\\/](vue|@vue|vue-router|pinia)[\\/]/.test(id)) return 'vendor-vue'
+          if (/[\\/]node_modules[\\/](quasar|@quasar)[\\/]/.test(id)) return 'vendor-quasar'
+          if (/[\\/]node_modules[\\/]axios[\\/]/.test(id)) return 'vendor-axios'
+          return undefined
+        }
+      }
+    }
   }
 })

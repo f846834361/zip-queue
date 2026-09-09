@@ -23,7 +23,7 @@ func Open(dbPath string, logLevel string) (*gorm.DB, error) {
 	gormCfg := &gorm.Config{
 		Logger: logger.Default.LogMode(parseLogLevel(logLevel)),
 	}
-	gdb, err := gorm.Open(sqlite.Open(dbPath), gormCfg)
+	gdb, err := gorm.Open(sqlite.Open(sqliteDSN(dbPath)), gormCfg)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
@@ -31,6 +31,16 @@ func Open(dbPath string, logLevel string) (*gorm.DB, error) {
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
 	return gdb, nil
+}
+
+// sqliteDSN 为 SQLite 路径构造 DSN：启用 WAL（允许读写并发）与 busy_timeout
+// （worker 进度回写与 API 并发写时等待锁而非直接报 SQLITE_BUSY）。
+func sqliteDSN(path string) string {
+	sep := "?"
+	if strings.Contains(path, "?") {
+		sep = "&"
+	}
+	return filepath.ToSlash(path) + sep + "_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)"
 }
 
 func parseLogLevel(s string) logger.LogLevel {

@@ -15,7 +15,7 @@ import (
 var ErrPasswordRequired = fmt.Errorf("zip is encrypted but no matching password found")
 
 // extractZip 解压 zip 到 targetDir，应用智能合并；支持加密 zip（按密码列表顺序尝试）。
-func extractZip(ctx context.Context, src, targetDir string, passwords []string, p ProgressFn) error {
+func extractZip(ctx context.Context, src, targetDir string, passwords []string, limits Limits, p ProgressFn) error {
 	if err := os.MkdirAll(targetDir, 0o755); err != nil {
 		return fmt.Errorf("mkdir target: %w", err)
 	}
@@ -58,6 +58,9 @@ func extractZip(ctx context.Context, src, targetDir string, passwords []string, 
 			totalEntries++
 		}
 	}
+	if limits.MaxTotalBytes > 0 && totalBytes > limits.MaxTotalBytes {
+		return fmt.Errorf("%w：压缩包解压后约 %d 字节，超过上限 %d", ErrLimitExceeded, totalBytes, limits.MaxTotalBytes)
+	}
 	t := newTracker(totalBytes, totalEntries, p)
 
 	for _, f := range r.File {
@@ -96,11 +99,19 @@ func extractZip(ctx context.Context, src, targetDir string, passwords []string, 
 			return err
 		}
 		cw := &countWriter{w: out, t: t}
-		_, copyErr := io.Copy(cw, rc)
+		// 单条目可写字节数 = 剩余额度（未配置上限时 -1 表示不限）
+		maxBytes := int64(-1)
+		if limits.MaxTotalBytes > 0 {
+			maxBytes = limits.MaxTotalBytes - t.processedBytes
+		}
+		_, copyErr := copyWithLimit(ctx, cw, rc, maxBytes)
+		closeErr := out.Close()
 		rc.Close()
-		out.Close()
 		if copyErr != nil {
 			return copyErr
+		}
+		if closeErr != nil {
+			return fmt.Errorf("close %q: %w", dest, closeErr)
 		}
 		_ = os.Chmod(dest, f.Mode().Perm())
 		t.entryDone()
@@ -137,87 +148,5 @@ func tryPasswords(r *zip.ReadCloser, passwords []string) (string, error) {
 	return "", ErrPasswordRequired
 }
 
-// Compress 将 src（文件夹或单文件）压缩为 destZip（zip/deflate）。
-func Compress(ctx context.Context, src, destZip string, p ProgressFn) error {
-	info, err := os.Stat(src)
-	if err != nil {
-		return err
-	}
-	var files []string
-	var totalBytes int64
-	var basePath string
-	if info.IsDir() {
-		basePath = src
-		walkErr := filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
-			if err != nil {
-				return err
-			}
-			if info.IsDir() {
-				return nil
-			}
-			files = append(files, path)
-			totalBytes += info.Size()
-			return nil
-		})
-		if walkErr != nil {
-			return walkErr
-		}
-	} else {
-		basePath = filepath.Dir(src)
-		files = []string{src}
-		totalBytes = info.Size()
-	}
-	if len(files) == 0 {
-		return fmt.Errorf("no files to compress in %s", src)
-	}
-	if err := os.MkdirAll(filepath.Dir(destZip), 0o755); err != nil {
-		return err
-	}
-	out, err := os.Create(destZip)
-	if err != nil {
-		return err
-	}
-	defer out.Close()
-	zw := zip.NewWriter(out)
-	defer zw.Close()
-
-	t := newTracker(totalBytes, len(files), p)
-	for _, fpath := range files {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		rel, err := filepath.Rel(basePath, fpath)
-		if err != nil {
-			return err
-		}
-		rel = filepath.ToSlash(rel)
-		t.setCurrent(rel)
-		info, err := os.Stat(fpath)
-		if err != nil {
-			return err
-		}
-		h, err := zip.FileInfoHeader(info)
-		if err != nil {
-			return err
-		}
-		h.Name = rel
-		h.Method = zip.Deflate
-		w, err := zw.CreateHeader(h)
-		if err != nil {
-			return err
-		}
-		f, err := os.Open(fpath)
-		if err != nil {
-			return err
-		}
-		cw := &countWriter{w: w, t: t}
-		_, copyErr := io.Copy(cw, f)
-		f.Close()
-		if copyErr != nil {
-			return copyErr
-		}
-		t.entryDone()
-	}
-	t.notify(true)
-	return nil
-}
+// 压缩实现见 compress.go：写入改用标准库 archive/zip，以便按压缩效率档位
+// 指定 Deflate 级别或仅打包（Store）；本文件只负责加密 zip 的解压。

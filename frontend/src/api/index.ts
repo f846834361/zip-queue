@@ -42,6 +42,8 @@ export interface Task {
   current_entry: string
   error: string
   requeue_count: number
+  /** 压缩任务执行时实际使用的效率档位；解压任务及历史记录为 null/缺省。 */
+  compression_level?: 'fastest' | 'fast' | 'normal' | 'slow' | null
   created_at: string
   started_at: string | null
   completed_at: string | null
@@ -63,11 +65,22 @@ export interface AppConfig {
   max_concurrent_tasks: number
   default_browse_path: string
   penetrate_subfolders: boolean
+  /** 压缩效率：fastest 特快（仅打包）/ fast 快 / normal 中 / slow 慢 */
+  compression_level: 'fastest' | 'fast' | 'normal' | 'slow'
+}
+
+/** 可在配置页修改、提交到后端保存的字段（均为可选，只传需要变更的项）。 */
+export interface UpdateConfigBody {
+  penetrate_subfolders?: boolean
+  max_concurrent_tasks?: number
+  compression_level?: AppConfig['compression_level']
 }
 
 export interface BulkResponse {
   created: number
   ids: number[]
+  // 与已有进行中任务同源被跳过的数量
+  skipped?: number
 }
 
 export interface BatchCreateResponse extends BulkResponse {
@@ -88,7 +101,7 @@ export const api = {
   async getConfig(): Promise<AppConfig> {
     return (await http.get<AppConfig>('/config')).data
   },
-  async updateConfig(body: { penetrate_subfolders: boolean }): Promise<AppConfig> {
+  async updateConfig(body: UpdateConfigBody): Promise<AppConfig> {
     return (await http.put<AppConfig>('/config', body)).data
   },
   async listDir(path?: string): Promise<ListDirResponse> {

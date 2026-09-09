@@ -1,12 +1,14 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted } from 'vue'
 import { useQuasar } from 'quasar'
-import api, { type AppConfig } from '../api'
 import { useUiStore } from '../stores/ui'
+import { useBrowseStore } from '../stores/browse'
+import { compressionLabel } from '../utils/task'
 
 const $q = useQuasar()
 
 const ui = useUiStore()
+const browse = useBrowseStore()
 // 首次进入且无持久化记录时，按平台默认（桌面打开 / 移动端收起）
 ui.initDrawer($q.platform.is.desktop)
 const leftDrawerOpen = computed({
@@ -14,7 +16,8 @@ const leftDrawerOpen = computed({
   set: (open: boolean) => ui.setLeftDrawerOpen(open)
 })
 
-const config = ref<AppConfig | null>(null)
+// 配置由 browse store 缓存，与文件页共享同一次请求
+const config = computed(() => browse.config)
 
 const links = computed(() => [
   { to: '/', label: '文件浏览', icon: 'folder_open' },
@@ -24,7 +27,7 @@ const links = computed(() => [
 
 onMounted(async () => {
   try {
-    config.value = await api.getConfig()
+    await browse.ensureConfig()
   } catch (e) {
     $q.notify({ type: 'negative', message: (e as Error).message })
   }
@@ -37,12 +40,16 @@ onMounted(async () => {
       <q-toolbar>
         <q-btn dense flat round icon="menu" @click="leftDrawerOpen = !leftDrawerOpen" />
         <q-toolbar-title class="text-weight-medium">
-          <q-icon name="archive" size="24px" class="q-mr-sm" />
-          Zip-Queue
+          <!-- 点击 logo 回到文件浏览页；用 router-link 保留可访问性与右键/中键打开能力 -->
+          <router-link :to="{ name: 'files' }" class="logo-link text-white">
+            <q-icon name="archive" size="24px" class="q-mr-sm" />
+            Zip-Queue
+          </router-link>
         </q-toolbar-title>
         <template v-if="config">
           <q-chip dense square color="white" text-color="primary" class="q-mr-none">
-            并发 {{ config.max_concurrent_tasks }}
+            压缩效率 {{ compressionLabel(config.compression_level) }}
+            <q-tooltip>当前压缩效率，可在配置页修改</q-tooltip>
           </q-chip>
         </template>
       </q-toolbar>
@@ -73,3 +80,13 @@ onMounted(async () => {
     </q-page-container>
   </q-layout>
 </template>
+
+<style scoped>
+.logo-link {
+  text-decoration: none;
+  cursor: pointer;
+}
+.logo-link:hover {
+  opacity: 0.85;
+}
+</style>

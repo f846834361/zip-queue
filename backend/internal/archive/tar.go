@@ -46,7 +46,7 @@ func scanTar(src string, gz bool) ([]entryMeta, error) {
 }
 
 // extractTar 解压 tar（gz=true 时为 tar.gz）到 targetDir，应用智能合并。
-func extractTar(ctx context.Context, src, targetDir string, p ProgressFn, gz bool) error {
+func extractTar(ctx context.Context, src, targetDir string, limits Limits, p ProgressFn, gz bool) error {
 	if err := os.MkdirAll(targetDir, 0o755); err != nil {
 		return fmt.Errorf("mkdir target: %w", err)
 	}
@@ -62,6 +62,9 @@ func extractTar(ctx context.Context, src, targetDir string, p ProgressFn, gz boo
 			totalBytes += e.size
 			totalEntries++
 		}
+	}
+	if limits.MaxTotalBytes > 0 && totalBytes > limits.MaxTotalBytes {
+		return fmt.Errorf("%w：压缩包解压后约 %d 字节，超过上限 %d", ErrLimitExceeded, totalBytes, limits.MaxTotalBytes)
 	}
 	t := newTracker(totalBytes, totalEntries, p)
 
@@ -113,10 +116,18 @@ func extractTar(ctx context.Context, src, targetDir string, p ProgressFn, gz boo
 				return err
 			}
 			cw := &countWriter{w: out, t: t}
-			_, copyErr := io.Copy(cw, tr)
-			out.Close()
+			// 单条目可写字节数 = 剩余额度（未配置上限时 -1 表示不限）
+			maxBytes := int64(-1)
+			if limits.MaxTotalBytes > 0 {
+				maxBytes = limits.MaxTotalBytes - t.processedBytes
+			}
+			_, copyErr := copyWithLimit(ctx, cw, tr, maxBytes)
+			closeErr := out.Close()
 			if copyErr != nil {
 				return copyErr
+			}
+			if closeErr != nil {
+				return fmt.Errorf("close %q: %w", dest, closeErr)
 			}
 			_ = os.Chmod(dest, os.FileMode(h.Mode).Perm())
 			t.entryDone()

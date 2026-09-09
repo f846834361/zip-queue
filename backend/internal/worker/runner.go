@@ -3,21 +3,29 @@ package worker
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"gorm.io/gorm"
 
 	"zip-queue/internal/archive"
 	"zip-queue/internal/model"
+	"zip-queue/internal/setting"
 )
+
+// TempDirPrefix 是任务执行期临时目录/临时文件名前缀。
+// API 侧批量扫描目录时会跳过带此前缀的路径，避免扫到运行中任务的产物。
+const TempDirPrefix = ".zq-tmp-"
 
 // loadPasswords 按 sort_order 顺序加载全部已启用密码的值（停用密码跳过）。
 func loadPasswords(db *gorm.DB) []string {
 	var pws []model.Password
 	if err := db.Where("enabled = ?", true).Order("sort_order asc, id asc").Find(&pws).Error; err != nil {
+		log.Printf("加载密码列表失败，本次执行将无法解密加密包：%v", err)
 		return nil
 	}
 	out := make([]string, 0, len(pws))
@@ -27,12 +35,21 @@ func loadPasswords(db *gorm.DB) []string {
 	return out
 }
 
-// Runner 执行单个任务（解压或压缩）的全部副作用：临时目录、进度落库、替换原文件、清理。
-type Runner struct {
-	db *gorm.DB
+// loadCompressionLevel 读取压缩效率档位（任务开始时取一次，未设置回落默认档）。
+// 与密码同样在任务执行时读库，使页面改配置只影响之后开始的任务。
+func loadCompressionLevel(db *gorm.DB) archive.Level {
+	return archive.ParseLevel(setting.Get(db, setting.KeyCompressionLevel))
 }
 
-func NewRunner(db *gorm.DB) *Runner { return &Runner{db: db} }
+// Runner 执行单个任务（解压或压缩）的全部副作用：临时目录、进度落库、替换原文件、清理。
+type Runner struct {
+	db     *gorm.DB
+	limits archive.Limits
+}
+
+func NewRunner(db *gorm.DB, limits archive.Limits) *Runner {
+	return &Runner{db: db, limits: limits}
+}
 
 // Run 执行一个已处于 running 状态的任务。
 func (r *Runner) Run(ctx context.Context, task *model.Task) {
@@ -65,7 +82,7 @@ func (r *Runner) runDecompress(ctx context.Context, task *model.Task) {
 		return
 	}
 	dir := filepath.Dir(src)
-	base := stripArchiveExt(filepath.Base(src))
+	base := archive.StripArchiveExt(filepath.Base(src))
 	if base == "" {
 		base = "decompressed"
 	}
@@ -77,11 +94,11 @@ func (r *Runner) runDecompress(ctx context.Context, task *model.Task) {
 		return
 	}
 
-	tempDir := filepath.Join(dir, fmt.Sprintf(".zq-tmp-%d", task.ID))
+	tempDir := filepath.Join(dir, fmt.Sprintf("%s%d", TempDirPrefix, task.ID))
 	_ = os.RemoveAll(tempDir)
 	r.setTempTarget(task, tempDir, target)
 
-	if err := archive.Extract(ctx, src, tempDir, loadPasswords(r.db), r.progressFn(task)); err != nil {
+	if err := archive.Extract(ctx, src, tempDir, loadPasswords(r.db), r.limits, r.progressFn(task)); err != nil {
 		if ctx.Err() != nil {
 			// 服务停止/重启导致的中断：删除临时文件，可安全重做的补一条待执行任务
 			FinishInterrupted(r.db, task)
@@ -136,11 +153,16 @@ func (r *Runner) runCompress(ctx context.Context, task *model.Task) {
 		r.fail(task, classifyTargetExists(target, true))
 		return
 	}
-	tempZip := filepath.Join(dir, fmt.Sprintf(".zq-tmp-%d.zip", task.ID))
+	tempZip := filepath.Join(dir, fmt.Sprintf("%s%d.zip", TempDirPrefix, task.ID))
 	_ = os.RemoveAll(tempZip)
 	r.setTempTarget(task, tempZip, target)
 
-	if err := archive.Compress(ctx, src, tempZip, r.progressFn(task)); err != nil {
+	// 任务开始执行时取一次压缩效率档位（与密码同样执行期读库），并记录到任务，
+	// 使任务详情可回显"当时实际使用的效率"，即使之后在配置页改动也不受影响。
+	level := loadCompressionLevel(r.db)
+	r.updateTask(task.ID, map[string]interface{}{"compression_level": string(level)}, "写入压缩效率档位")
+
+	if err := archive.Compress(ctx, src, tempZip, level, r.progressFn(task)); err != nil {
 		if ctx.Err() != nil {
 			// 服务停止/重启导致的中断：删除临时文件，可安全重做的补一条待执行任务
 			FinishInterrupted(r.db, task)
@@ -175,54 +197,62 @@ func (r *Runner) progressFn(task *model.Task) archive.ProgressFn {
 		if pct := p.Percent(); pct >= 0 {
 			updates["progress_percent"] = pct
 		}
-		r.db.Model(&model.Task{}).Where("id = ?", task.ID).Updates(updates)
+		if err := r.db.Model(&model.Task{}).Where("id = ?", task.ID).Updates(updates).Error; err != nil {
+			log.Printf("任务 #%d 进度回写失败：%v", task.ID, err)
+		}
 	}
 }
 
 func (r *Runner) setTempTarget(task *model.Task, temp, target string) {
 	task.TempPath = temp
 	task.TargetPath = target
-	r.db.Model(&model.Task{}).Where("id = ?", task.ID).Updates(map[string]interface{}{
+	r.updateTask(task.ID, map[string]interface{}{
 		"temp_path":   temp,
 		"target_path": target,
-	})
+	}, "写入临时路径")
 }
 
 func (r *Runner) fail(task *model.Task, msg string) {
-	now := time.Now()
-	r.db.Model(&model.Task{}).Where("id = ?", task.ID).Updates(map[string]interface{}{
+	r.updateTask(task.ID, map[string]interface{}{
 		"status":       model.StatusFailed,
 		"error":        truncate(msg, 2048),
-		"completed_at": now,
+		"completed_at": time.Now(),
 		"temp_path":    "",
-	})
+	}, "写入失败状态")
 }
 
 func (r *Runner) succeed(task *model.Task) {
-	now := time.Now()
-	r.db.Model(&model.Task{}).Where("id = ?", task.ID).Updates(map[string]interface{}{
+	r.updateTask(task.ID, map[string]interface{}{
 		"status":           model.StatusSucceeded,
 		"progress_percent": 100,
-		"completed_at":     now,
+		"completed_at":     time.Now(),
 		"temp_path":        "",
 		"error":            "",
-	})
+	}, "写入成功状态")
+}
+
+// updateTask 写入任务字段，失败时重试一次并记录日志。
+// 状态落库失败的任务会停留在 running，由下次重启的 RecoverOnStartup 兜底，
+// 这里至少要把失败暴露到日志。
+func (r *Runner) updateTask(taskID uint, updates map[string]interface{}, what string) {
+	err := r.db.Model(&model.Task{}).Where("id = ?", taskID).Updates(updates).Error
+	if err == nil {
+		return
+	}
+	log.Printf("任务 #%d %s失败，重试一次：%v", taskID, what, err)
+	time.Sleep(100 * time.Millisecond)
+	if err := r.db.Model(&model.Task{}).Where("id = ?", taskID).Updates(updates).Error; err != nil {
+		log.Printf("任务 #%d %s仍失败，重启后由启动恢复兜底：%v", taskID, what, err)
+	}
 }
 
 func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
-	return s[:n]
-}
-
-// stripArchiveExt 去除压缩包扩展名（长后缀优先）。
-func stripArchiveExt(name string) string {
-	lower := strings.ToLower(name)
-	for _, ext := range []string{".tar.gz", ".tgz", ".tar", ".zip", ".gz"} {
-		if strings.HasSuffix(lower, ext) {
-			return name[:len(name)-len(ext)]
-		}
+	// 按 rune 边界回退，避免把多字节字符（如中文）切成非法 UTF-8
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
 	}
-	return name
+	return s[:n]
 }

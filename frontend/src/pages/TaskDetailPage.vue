@@ -1,8 +1,11 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useQuasar } from 'quasar'
 import api, { type Task } from '../api'
+import { formatDateTime, formatSize } from '../utils/format'
+import { POLL_INTERVAL, statusColor, statusLabel, typeLabel, compressionLabel } from '../utils/task'
+import { usePolling } from '../composables/usePolling'
 
 const props = defineProps<{ id?: string }>()
 
@@ -16,43 +19,8 @@ const error = ref('')
 const retrying = ref(false)
 // 本页只允许重试一次（刷新或重新进入页面后重置），避免重复点击创建多条重复任务
 const retried = ref(false)
-let timer: ReturnType<typeof setInterval> | null = null
 
-function formatBytes(b: number): string {
-  if (!b) return '0 B'
-  const units = ['B', 'KB', 'MB', 'GB', 'TB']
-  const i = Math.floor(Math.log(b) / Math.log(1024))
-  return `${(b / Math.pow(1024, i)).toFixed(1)} ${units[i]}`
-}
-
-function formatDateTime(s: string | null): string {
-  if (!s) return '—'
-  const d = new Date(s)
-  if (Number.isNaN(d.getTime())) return s
-  return d.toLocaleString()
-}
-
-function statusColor(s: string): string {
-  switch (s) {
-    case 'pending': return 'grey-6'
-    case 'running': return 'blue-7'
-    case 'succeeded': return 'green-7'
-    case 'failed': return 'red-7'
-    default: return 'grey-6'
-  }
-}
-function statusLabel(s: string): string {
-  switch (s) {
-    case 'pending': return '待处理'
-    case 'running': return '执行中'
-    case 'succeeded': return '成功'
-    case 'failed': return '失败'
-    default: return s
-  }
-}
-function typeLabel(t: string): string {
-  return t === 'decompress' ? '解压' : '压缩'
-}
+const pollIntervalText = `每 ${POLL_INTERVAL / 1000} 秒更新`
 
 const taskId = computed(() => Number(props.id ?? route.params.id))
 const isRunning = computed(() => task.value?.status === 'running')
@@ -62,29 +30,23 @@ const isFinished = computed(
 )
 const isFailed = computed(() => task.value?.status === 'failed')
 
-function stopPolling() {
-  if (timer) {
-    clearInterval(timer)
-    timer = null
-  }
-}
-
-function startPolling() {
-  stopPolling()
-  if (isRunning.value || isPending.value) {
-    timer = setInterval(refresh, 2000)
-  }
-}
+// 轮询直到任务结束或请求出错
+const polling = usePolling(refresh, POLL_INTERVAL)
 
 async function refresh() {
   if (!taskId.value) return
   try {
     task.value = await api.getTask(taskId.value)
-    if (isFinished.value) stopPolling()
+    if (isFinished.value) polling.stop()
   } catch (e) {
     error.value = (e as Error).message
-    stopPolling()
+    polling.stop()
   }
+}
+
+function startPolling() {
+  polling.stop()
+  if (isRunning.value || isPending.value) polling.start()
 }
 
 async function loadInitial() {
@@ -137,12 +99,11 @@ async function retryTask() {
 }
 
 watch(taskId, () => {
-  stopPolling()
+  polling.stop()
   void loadInitial()
 })
 
 onMounted(loadInitial)
-onBeforeUnmount(stopPolling)
 </script>
 
 <template>
@@ -207,6 +168,14 @@ onBeforeUnmount(stopPolling)
               v-if="task"
               :color="statusColor(task.status)"
               :label="statusLabel(task.status)"
+              class="q-mt-xs"
+            />
+          </div>
+          <div v-if="task && task.type === 'compress'" class="col-12 col-md-6">
+            <div class="text-caption text-grey-7">压缩效率</div>
+            <q-badge
+              color="indigo"
+              :label="compressionLabel(task.compression_level)"
               class="q-mt-xs"
             />
           </div>
@@ -280,10 +249,10 @@ onBeforeUnmount(stopPolling)
             <q-item-section side>字节</q-item-section>
             <q-item-section>
               <template v-if="task.total_bytes">
-                {{ formatBytes(task.processed_bytes) }} / {{ formatBytes(task.total_bytes) }}
+                {{ formatSize(task.processed_bytes) }} / {{ formatSize(task.total_bytes) }}
               </template>
               <template v-else>
-                {{ formatBytes(task.processed_bytes) }}{{ task.status === 'running' ? '（估算中）' : '' }}
+                {{ formatSize(task.processed_bytes) }}{{ task.status === 'running' ? '（估算中）' : '' }}
               </template>
             </q-item-section>
           </q-item>
@@ -291,7 +260,7 @@ onBeforeUnmount(stopPolling)
             <q-item-section side>自动刷新</q-item-section>
             <q-item-section>
               <q-spinner-dots color="primary" size="sm" class="q-mr-sm" />
-              <span class="text-caption text-grey-7">每 2 秒更新</span>
+              <span class="text-caption text-grey-7">{{ pollIntervalText }}</span>
             </q-item-section>
           </q-item>
         </q-list>

@@ -1,9 +1,12 @@
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
+import { onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useQuasar } from 'quasar'
 import api, { type Task } from '../api'
 import DateTimePicker from '../components/DateTimePicker.vue'
+import { formatDateTime } from '../utils/format'
+import { POLL_INTERVAL, statusColor, statusLabel, typeLabel } from '../utils/task'
+import { usePolling } from '../composables/usePolling'
 
 const $q = useQuasar()
 const router = useRouter()
@@ -53,35 +56,6 @@ const columns = [
   { name: 'actions', label: '操作', field: 'actions', align: 'right' as const }
 ]
 
-function formatDateTime(s: string | null): string {
-  if (!s) return '—'
-  const d = new Date(s)
-  if (Number.isNaN(d.getTime())) return s
-  return d.toLocaleString()
-}
-
-function statusColor(status: string): string {
-  switch (status) {
-    case 'pending': return 'grey-6'
-    case 'running': return 'blue-7'
-    case 'succeeded': return 'green-7'
-    case 'failed': return 'red-7'
-    default: return 'grey-6'
-  }
-}
-function statusLabel(status: string): string {
-  switch (status) {
-    case 'pending': return '待处理'
-    case 'running': return '执行中'
-    case 'succeeded': return '成功'
-    case 'failed': return '失败'
-    default: return status
-  }
-}
-function typeLabel(type: string): string {
-  return type === 'decompress' ? '解压' : '压缩'
-}
-
 function buildParams() {
   const params: Record<string, string | number> = {
     page: page.value,
@@ -113,13 +87,13 @@ function checkRange(): string | null {
   return null
 }
 
-async function fetchList() {
+async function fetchList(silent = false) {
   const rangeError = checkRange()
   if (rangeError) {
-    $q.notify({ type: 'warning', message: rangeError })
+    if (!silent) $q.notify({ type: 'warning', message: rangeError })
     return
   }
-  loading.value = true
+  if (!silent) loading.value = true
   try {
     const resp = await api.listTasks(buildParams())
     items.value = resp.items
@@ -131,11 +105,22 @@ async function fetchList() {
       sortBy: pagination.value.sortBy,
       descending: pagination.value.descending
     }
+    syncPolling()
   } catch (e) {
-    $q.notify({ type: 'negative', message: (e as Error).message })
+    // 轮询失败保持静默，不打扰用户；由手动操作时的请求提示错误
+    if (!silent) $q.notify({ type: 'negative', message: (e as Error).message })
   } finally {
-    loading.value = false
+    if (!silent) loading.value = false
   }
+}
+
+// 列表存在 pending/running 任务时静默轮询刷新，全部结束后自动停止
+const polling = usePolling(() => fetchList(true), POLL_INTERVAL)
+
+function syncPolling() {
+  const active = items.value.some((t) => t.status === 'pending' || t.status === 'running')
+  if (active) polling.start()
+  else polling.stop()
 }
 
 function onRequest(payload: { pagination: { page: number; rowsPerPage: number; sortBy?: string; descending?: boolean } }) {
@@ -148,10 +133,26 @@ function onRowClick(_evt: unknown, row: Task) {
   openDetail(row)
 }
 
-function applyFilters() {
-  page.value = 1
-  void fetchList()
-}
+// 实时筛选：条件变化后防抖自动刷新，无需点击"筛选"按钮，
+// 输入过程中也不会每敲一个字就发请求。
+const FILTER_DEBOUNCE_MS = 400
+let filterTimer: ReturnType<typeof setTimeout> | undefined
+
+watch(
+  filters,
+  () => {
+    if (filterTimer) clearTimeout(filterTimer)
+    filterTimer = setTimeout(() => {
+      page.value = 1
+      void fetchList()
+    }, FILTER_DEBOUNCE_MS)
+  },
+  { deep: true }
+)
+
+onBeforeUnmount(() => {
+  if (filterTimer) clearTimeout(filterTimer)
+})
 
 function resetFilters() {
   filters.status = ''
@@ -159,8 +160,6 @@ function resetFilters() {
   filters.source_path = ''
   filters.completed_after = ''
   filters.completed_before = ''
-  page.value = 1
-  void fetchList()
 }
 
 function openDetail(row: Task) {
@@ -230,10 +229,15 @@ onMounted(fetchList)
             <date-time-picker v-model="filters.completed_before" label="完成时间到" default-time="23:59" />
           </div>
           <div class="col-12 col-md-1">
-            <div class="row q-gutter-xs">
-              <q-btn color="primary" icon="search" label="筛选" unelevated dense @click="applyFilters" class="full-width" />
-              <q-btn color="grey-7" icon="restart_alt" label="重置" flat dense @click="resetFilters" class="full-width" />
-            </div>
+            <!-- <q-btn
+              color="grey-7"
+              icon="restart_alt"
+              label="重置"
+              flat
+              dense
+              @click="resetFilters"
+              class="full-width"
+            /> -->
           </div>
         </div>
       </q-card-section>
