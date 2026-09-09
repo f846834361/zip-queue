@@ -40,8 +40,7 @@ func extractGzipSingle(ctx context.Context, src, targetDir string, limits Limits
 	// 兜底关闭；成功路径下方显式 Close 并检查错误
 	defer out.Close()
 
-	t := newTracker(0, 1, p) // totalBytes=0 -> 不确定进度
-	t.setCurrent(base)
+	t := newTracker(0, p) // totalBytes=0 -> 不确定进度
 	cw := &countWriter{w: out, t: t}
 	if _, err := copyWithLimit(ctx, cw, gzr, limits.MaxTotalBytes); err != nil {
 		return err
@@ -50,7 +49,6 @@ func extractGzipSingle(ctx context.Context, src, targetDir string, limits Limits
 		return fmt.Errorf("close %q: %w", dest, err)
 	}
 	_ = os.Chmod(dest, 0o644)
-	t.entryDone()
 	t.notify(true)
 	return nil
 }

@@ -188,11 +188,8 @@ func (r *Runner) runCompress(ctx context.Context, task *model.Task) {
 func (r *Runner) progressFn(task *model.Task) archive.ProgressFn {
 	return func(p archive.Progress) {
 		updates := map[string]interface{}{
-			"processed_bytes":   p.ProcessedBytes,
-			"total_bytes":       p.TotalBytes,
-			"processed_entries": p.ProcessedEntries,
-			"total_entries":     p.TotalEntries,
-			"current_entry":     p.CurrentEntry,
+			"processed_bytes": p.ProcessedBytes,
+			"total_bytes":     p.TotalBytes,
 		}
 		if pct := p.Percent(); pct >= 0 {
 			updates["progress_percent"] = pct

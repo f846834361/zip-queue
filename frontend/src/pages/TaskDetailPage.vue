@@ -236,16 +236,6 @@ onMounted(loadInitial)
 
         <q-list dense v-if="task">
           <q-item>
-            <q-item-section side>当前文件</q-item-section>
-            <q-item-section class="mono text-break-all">{{ task.current_entry || '—' }}</q-item-section>
-          </q-item>
-          <q-item>
-            <q-item-section side>条目</q-item-section>
-            <q-item-section>
-              {{ task.processed_entries }} / {{ task.total_entries || '—' }}
-            </q-item-section>
-          </q-item>
-          <q-item>
             <q-item-section side>字节</q-item-section>
             <q-item-section>
               <template v-if="task.total_bytes">
