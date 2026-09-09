@@ -461,6 +461,17 @@ func (a *API) RetryTask(c *gin.Context) {
 	c.JSON(201, gin.H{"id": nt.ID, "requeue_count": nt.RequeueCount})
 }
 
+// WakeTasks 手动唤醒调度器：立即重新扫描 pending 任务并补满空闲并发槽。
+// 正常路径（建任务 / 任务结束 / 调整并发 / 重试）都会自动唤醒，
+// 此接口用于异常情况下由用户在配置页兜底唤醒。
+func (a *API) WakeTasks(c *gin.Context) {
+	var pending, running int64
+	a.db.Model(&model.Task{}).Where("status = ?", model.StatusPending).Count(&pending)
+	a.db.Model(&model.Task{}).Where("status = ?", model.StatusRunning).Count(&running)
+	a.pool.Enqueue()
+	c.JSON(200, gin.H{"ok": true, "pending": pending, "running": running})
+}
+
 // DeleteTask 删除任务记录（仅允许已结束任务）。
 func (a *API) DeleteTask(c *gin.Context) {
 	id, err := strconv.ParseUint(c.Param("id"), 10, 64)

@@ -127,6 +127,7 @@ npm run build      # 产出 frontend/dist，供 go:embed 嵌入
 | GET | `/api/health` | 健康检查 |
 | POST | `/api/tasks` | 创建单个任务 |
 | POST | `/api/tasks/batch` | 批量创建任务 |
+| POST | `/api/tasks/wake` | 手动唤醒调度器（任务卡在待处理时的用户兜底） |
 | POST | `/api/tasks/bulk-decompress` | 扫描目录批量解压 |
 | POST | `/api/tasks/bulk-compress` | 扫描目录批量压缩 |
 | GET | `/api/tasks` | 任务列表（分页 + 筛选） |

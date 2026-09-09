@@ -1,9 +1,8 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
-import { useQuasar, QInput } from 'quasar'
+import { computed, onMounted, ref } from 'vue'
+import { useQuasar } from 'quasar'
 import api, { type AppConfig, type FsEntry } from '../api'
 import { useBrowseStore } from '../stores/browse'
-import { formatDateTime, formatSize } from '../utils/format'
 
 const $q = useQuasar()
 const browseStore = useBrowseStore()
@@ -13,48 +12,8 @@ const currentPath = ref('')
 const manualPath = ref('')
 const entries = ref<FsEntry[]>([])
 const loading = ref(false)
-// 用 Set 保存选中路径：勾选态查找 O(1)，避免大目录下 O(n·m) 的 includes 扫描
-const selected = ref<Set<string>>(new Set())
+const selected = ref<string[]>([])
 const submitting = ref(false)
-
-// 轻量级轮询：每 5 秒请求一次后端 file/status，用目录 mtime 判断是否需要刷新列表
-const POLL_INTERVAL_MS = 5000
-let pollTimer: ReturnType<typeof setInterval> | null = null
-// 当前目录 mtime 基线；与轮询返回的 modified 不一致即刷新
-const currentModified = ref(0)
-// 当前路径下进行中的任务数，仅用于 UI 提示
-const activeCount = ref(0)
-
-// 地址栏编辑态：true 时显示可输入路径输入框，false 时显示面包屑导航。
-const editing = ref(false)
-const pathInputRef = ref<InstanceType<typeof QInput> | null>(null)
-
-// 进入编辑态：聚焦输入框并全选当前路径，便于直接覆盖输入。
-function startEdit() {
-  if (editing.value) return
-  editing.value = true
-  manualPath.value = currentPath.value
-  nextTick(() => {
-    const el = pathInputRef.value
-    el?.focus()
-    el?.select?.()
-  })
-}
-
-// 退出编辑态：回归面包屑导航（未提交的输入作废）。用于 Esc。
-function cancelEdit() {
-  editing.value = false
-}
-
-// 失焦提交：若输入地址与原地址不同，则跳转到新地址；地址不存在时 load 报错
-// 且不改写 currentPath，自然保持原面包屑（不跳转）。用于输入框 blur。
-function commitEdit() {
-  const p = manualPath.value.trim()
-  if (p && p !== currentPath.value) {
-    void load(p)
-  }
-  editing.value = false
-}
 
 // 是否穿透子文件夹，来自配置页的全局开关（默认关闭）
 const penetrateSubfolders = computed(() => !!config.value?.penetrate_subfolders)
@@ -66,49 +25,36 @@ const columns = [
   { name: 'mod_time', label: '修改时间', field: 'mod_time', align: 'left' as const, sortable: true }
 ]
 
+function formatSize(bytes: number, isDir: boolean): string {
+  if (isDir) return '—'
+  if (!bytes) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  const i = Math.floor(Math.log(bytes) / Math.log(1024))
+  return `${(bytes / Math.pow(1024, i)).toFixed(1)} ${units[i]}`
+}
+
+function formatDate(s: string): string {
+  if (!s) return '—'
+  const d = new Date(s)
+  if (Number.isNaN(d.getTime())) return s
+  return d.toLocaleString()
+}
+
 async function load(path?: string) {
   loading.value = true
-  selected.value = new Set()
+  selected.value = []
   try {
     const resp = await api.listDir(path)
     currentPath.value = resp.path
     manualPath.value = resp.path
     entries.value = resp.entries
     browseStore.setPath(resp.path)
-    currentModified.value = resp.modified || 0
-    activeCount.value = 0
-    startPolling()
   } catch (e) {
-    $q.notify({ type: 'negative',  message: (e as Error).message })
+    $q.notify({ type: 'negative', message: (e as Error).message })
   } finally {
     loading.value = false
   }
 }
-
-// 启动/重启轮询定时器（导航到新目录时重置基线并重新计时）
-function startPolling() {
-  if (pollTimer !== null) clearInterval(pollTimer)
-  pollTimer = setInterval(pollOnce, POLL_INTERVAL_MS)
-}
-
-// 单次轮询：对比目录 mtime 决定是否刷新；轮询静默失败不干扰用户
-async function pollOnce() {
-  if (!currentPath.value) return
-  try {
-    const resp = await api.getFileStatus(currentPath.value)
-    activeCount.value = resp.active_count
-    if (resp.modified > 0 && resp.modified !== currentModified.value) {
-      currentModified.value = resp.modified
-      await load(currentPath.value)
-    }
-  } catch {
-    // 轮询错误静默忽略
-  }
-}
-
-onUnmounted(() => {
-  if (pollTimer !== null) clearInterval(pollTimer)
-})
 
 function parentPath(p: string): string | null {
   if (!p || p === '/' || p === '' ) return null
@@ -137,34 +83,13 @@ function openDir(row: FsEntry) {
 
 function submitManualPath() {
   const p = manualPath.value.trim()
-  if (!p) {
-    editing.value = false
-    return
-  }
-  editing.value = false
+  if (!p) return
   void load(p)
 }
 
 const selectedEntries = computed(() =>
-  entries.value.filter((e) => selected.value.has(e.path))
+  entries.value.filter((e) => selected.value.includes(e.path))
 )
-const selectedCount = computed(() => selected.value.size)
-
-// 面包屑分段：Windows/Unix 分隔符都兼容，逐级累加完整路径供点击跳转
-const breadcrumbSegments = computed(() => {
-  const p = currentPath.value
-  if (!p) return [] as { label: string; path: string }[]
-  const sep = p.includes('/') ? '/' : '\\'
-  const segs: { label: string; path: string }[] = []
-  for (const part of p.split(/[\\/]/).filter(Boolean)) {
-    const prev = segs.length ? segs[segs.length - 1].path : ''
-    segs.push({
-      label: part,
-      path: prev ? prev + sep + part : p.startsWith('/') ? '/' + part : part
-    })
-  }
-  return segs
-})
 
 const canDecompress = computed(() =>
   selectedEntries.value.some((e) => e.is_archive)
@@ -198,7 +123,7 @@ async function handleDecompress() {
   if (submitting.value) return
   submitting.value = true
   try {
-    if (selected.value.size > 0) {
+    if (selected.value.length > 0) {
       const archives = selectedEntries.value.filter((e) => e.is_archive)
       if (archives.length === 0) return
       const go = await confirmAction(
@@ -229,12 +154,12 @@ async function handleCompress() {
   if (submitting.value) return
   submitting.value = true
   try {
-    if (selected.value.size > 0) {
+    if (selected.value.length > 0) {
       const items = selectedEntries.value.filter((e) => !e.is_archive)
       if (items.length === 0) return
       const go = await confirmAction(
         '确认压缩',
-        `将为选中的 ${items.length} 项创建压缩任务并生成同名 .zip（每个选中的文件夹整体压缩为一个包，不展开其子文件夹），任务完成后会删除原文件/文件夹。是否继续？`
+        `将为选中的 ${items.length} 项（文件/文件夹）创建压缩任务并生成同名 .zip，任务完成后会删除原文件/文件夹。是否继续？`
       )
       if (go) await addToQueue('compress')
       return
@@ -283,7 +208,7 @@ async function addToQueue(type: 'decompress' | 'compress') {
       type: 'positive',
       message: `已创建 ${resp.created} 个${type === 'decompress' ? '解压' : '压缩'}任务${ignored}`
     })
-    selected.value = new Set()
+    selected.value = []
   } catch (e) {
     $q.notify({ type: 'negative', message: (e as Error).message })
   }
@@ -293,10 +218,9 @@ async function bulkDecompress() {
   if (!currentPath.value) return
   try {
     const resp = await api.bulkDecompress(currentPath.value, penetrateSubfolders.value)
-    const skipped = resp.skipped ? `，跳过 ${resp.skipped} 个已在进行中的压缩包` : ''
     $q.notify({
       type: 'positive',
-      message: `已创建 ${resp.created} 个解压任务${resp.created > 0 ? '（每个压缩包独立一条任务）' : ''}${skipped}`
+      message: `已创建 ${resp.created} 个解压任务${resp.created > 0 ? '（每个压缩包独立一条任务）' : ''}`
     })
   } catch (e) {
     $q.notify({ type: 'negative', message: (e as Error).message })
@@ -307,10 +231,9 @@ async function bulkCompress() {
   if (!currentPath.value) return
   try {
     const resp = await api.bulkCompress(currentPath.value, penetrateSubfolders.value)
-    const skipped = resp.skipped ? `，跳过 ${resp.skipped} 个已在进行中的项` : ''
     $q.notify({
       type: 'positive',
-      message: `已创建 ${resp.created} 个压缩任务${resp.created > 0 ? '（每个文件/文件夹独立一条任务）' : ''}${skipped}`
+      message: `已创建 ${resp.created} 个压缩任务${resp.created > 0 ? '（每个文件/文件夹独立一条任务）' : ''}`
     })
   } catch (e) {
     $q.notify({ type: 'negative', message: (e as Error).message })
@@ -319,8 +242,7 @@ async function bulkCompress() {
 
 onMounted(async () => {
   try {
-    // 配置由 browse store 缓存，与 MainLayout 共享同一次请求
-    config.value = await browseStore.ensureConfig()
+    config.value = await api.getConfig()
   } catch (e) {
     $q.notify({ type: 'negative', message: (e as Error).message })
   }
@@ -332,52 +254,44 @@ onMounted(async () => {
 function onRowClick(_evt: unknown, row: FsEntry) {
   openDir(row)
 }
-
-function onUpdateSelected(val: readonly FsEntry[]) {
-  selected.value = new Set(val.map((e) => e.path))
-}
 </script>
 
 <template>
   <q-page padding>
     <q-card flat bordered class="q-mb-md">
-      <q-card-section>
+      <q-card-section class="q-pb-none">
         <div class="row items-center q-gutter-sm">
-          <!-- 地址栏：默认显示面包屑（点击路径跳转）；点击/聚焦切换为输入框，失焦回归面包屑 -->
-          <div class="col address-bar row items-center" tabindex="0" @click="startEdit">
-            <q-breadcrumbs v-show="!editing" gutter="xs" class="text-body2 col">
-              <q-breadcrumbs-el
-                v-for="(seg, idx) in breadcrumbSegments"
-                :key="idx"
-                :label="seg.label"
-                icon="folder"
-                @click.stop="load(seg.path)"
-              />
-            </q-breadcrumbs>
-            <q-input
-              v-show="editing"
-              ref="pathInputRef"
-              v-model="manualPath"
-              outlined
-              dense
-              class="col"
-              @keyup.enter="submitManualPath"
-              @keyup.esc="cancelEdit"
-              @blur="commitEdit"
-            />
-          </div>
-          <q-chip
-            v-if="activeCount > 0"
+          <q-input
+            v-model="manualPath"
+            label="手动输入绝对路径"
+            outlined
             dense
-            color="blue-3"
-            text-color="black"
-            icon="sync"
-            class="q-ml-sm"
-          >
-            {{ activeCount }} 个后台任务进行中
-          </q-chip>
+            class="col"
+            clearable
+            @keyup.enter="submitManualPath"
+          />
+          <q-btn color="primary" icon="arrow_forward" label="前往" unelevated @click="submitManualPath" />
           <q-btn color="secondary" icon="arrow_upward" label="上级" outline @click="goUp" />
           <q-btn color="grey-7" icon="refresh" label="刷新" flat @click="load(currentPath)" />
+        </div>
+      </q-card-section>
+
+      <q-card-section class="q-pt-md">
+        <q-breadcrumbs gutter="sm" class="text-body2">
+          <q-breadcrumbs-el
+            v-for="(seg, idx) in currentPath.split(/[\\/]/).filter(Boolean).reduce((acc: {label:string,path:string}[], part) => {
+              const prev = acc.length ? acc[acc.length-1].path : ''
+              acc.push({ label: part, path: prev ? prev + (currentPath.includes('/') ? '/' : '\\') + part : (currentPath.startsWith('/') ? '/' + part : part) })
+              return acc
+            }, [])"
+            :key="idx"
+            :label="seg.label"
+            icon="folder"
+            @click="load(seg.path)"
+          />
+        </q-breadcrumbs>
+        <div v-if="currentPath" class="text-caption text-grey-7 q-mt-xs mono">
+          {{ currentPath }}
         </div>
       </q-card-section>
     </q-card>
@@ -389,28 +303,28 @@ function onUpdateSelected(val: readonly FsEntry[]) {
             <q-btn
               color="primary"
               icon="unarchive"
-              :label="selectedCount ? '解压' : '解压全部'"
+              :label="selected.length ? '解压' : '解压全部'"
               unelevated
               no-caps
               dense
-              :disable="submitting || (selectedCount > 0 && !canDecompress)"
+              :disable="submitting || (selected.length > 0 && !canDecompress)"
               :loading="submitting"
               @click="handleDecompress"
             />
             <q-btn
               color="secondary"
               icon="archive"
-              :label="selectedCount ? '压缩' : '压缩全部'"
+              :label="selected.length ? '压缩' : '压缩全部'"
               unelevated
               no-caps
               dense
-              :disable="submitting || (selectedCount > 0 && !canCompress)"
+              :disable="submitting || (selected.length > 0 && !canCompress)"
               :loading="submitting"
               @click="handleCompress"
             />
           </div>
-          <div v-if="selectedCount" class="text-caption text-grey-7">
-            已选 {{ selectedCount }} 项
+          <div v-if="selected.length" class="text-caption text-grey-7">
+            已选 {{ selected.length }} 项
           </div>
         </div>
       </q-card-section>
@@ -423,12 +337,9 @@ function onUpdateSelected(val: readonly FsEntry[]) {
           row-key="path"
           :pagination="{ rowsPerPage: 0 }"
           selection="multiple"
-          :selected="selectedEntries"
-          @update:selected="onUpdateSelected"
+          :selected="entries.filter((e) => selected.includes(e.path))"
+          @update:selected="(val) => { selected = val.map((e: FsEntry) => e.path) }"
           @row-click="onRowClick"
-          virtual-scroll
-          :virtual-scroll-slice-size="50"
-          style="max-height: 65vh"
           hide-pagination
           flat
         >
@@ -467,7 +378,7 @@ function onUpdateSelected(val: readonly FsEntry[]) {
             </q-td>
           </template>
           <template #body-cell-mod_time="props">
-            <q-td :props="props">{{ formatDateTime(props.row.mod_time) }}</q-td>
+            <q-td :props="props">{{ formatDate(props.row.mod_time) }}</q-td>
           </template>
           <template #no-data>
             <div class="full-width text-center text-grey q-pa-md">目录为空</div>
@@ -477,16 +388,3 @@ function onUpdateSelected(val: readonly FsEntry[]) {
     </q-card>
   </q-page>
 </template>
-
-<style scoped>
-/* 融合后的地址栏：面包屑态可点击切换为输入框，整条区域高亮提示可交互 */
-.address-bar {
-  min-height: 40px;
-  border-radius: 4px;
-  padding: 2px 6px;
-  cursor: text;
-}
-.address-bar:hover {
-  background: rgba(0, 0, 0, 0.04);
-}
-</style>

@@ -95,6 +95,14 @@ export interface BatchCreateResponse extends BulkResponse {
   skipped: number
 }
 
+export interface WakeResponse {
+  ok: boolean
+  /** 当前待处理任务数 */
+  pending: number
+  /** 当前执行中任务数 */
+  running: number
+}
+
 export interface Password {
   id: number
   value: string
@@ -136,6 +144,9 @@ export const api = {
   },
   async createTasksBatch(type: 'decompress' | 'compress', paths: string[]): Promise<BatchCreateResponse> {
     return (await http.post<BatchCreateResponse>('/tasks/batch', { type, paths })).data
+  },
+  async wakeTasks(): Promise<WakeResponse> {
+    return (await http.post<WakeResponse>('/tasks/wake')).data
   },
   async listTasks(params: Record<string, string | number>): Promise<TaskListResponse> {
     return (await http.get<TaskListResponse>('/tasks', { params })).data

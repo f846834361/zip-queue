@@ -55,7 +55,9 @@ func (p *Pool) Concurrency() int {
 }
 
 // Start 启动调度循环。返回后立即开始处理 pending 任务。
+// 调度为纯事件驱动，这里先唤醒一次，确保启动前已存在的 pending 任务被立即拾起。
 func (p *Pool) Start(ctx context.Context) {
+	p.Enqueue()
 	go p.loop(ctx)
 }
 
@@ -90,15 +92,14 @@ func (p *Pool) release() {
 	p.mu.Unlock()
 }
 
+// loop 调度主循环：纯事件驱动（建任务 / 任务结束 / 调整并发 / 重试 / 手动唤醒），
+// 不做定时轮询；若有任务卡在 pending，由配置页「唤醒任务队列」按钮兜底唤醒。
 func (p *Pool) loop(ctx context.Context) {
-	ticker := time.NewTicker(1 * time.Second)
-	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-p.wake:
-		case <-ticker.C:
 		}
 		p.dispatch(ctx)
 	}
@@ -163,6 +164,8 @@ func (p *Pool) dispatch(ctx context.Context) {
 				Error; uerr != nil {
 				log.Printf("任务 #%d 认领后回滚失败，将保持 running 直至重启恢复：%v", task.ID, uerr)
 			}
+			// 任务已回到 pending：延迟唤醒一次去重调度，避免立即重试造成忙循环
+			time.AfterFunc(2*time.Second, p.Enqueue)
 			return
 		}
 
