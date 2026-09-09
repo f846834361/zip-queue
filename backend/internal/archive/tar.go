@@ -56,17 +56,15 @@ func extractTar(ctx context.Context, src, targetDir string, limits Limits, p Pro
 	}
 	strip := determineStrip(entries)
 	var totalBytes int64
-	totalEntries := 0
 	for _, e := range entries {
 		if !e.isDir {
 			totalBytes += e.size
-			totalEntries++
 		}
 	}
 	if limits.MaxTotalBytes > 0 && totalBytes > limits.MaxTotalBytes {
 		return fmt.Errorf("%w：压缩包解压后约 %d 字节，超过上限 %d", ErrLimitExceeded, totalBytes, limits.MaxTotalBytes)
 	}
-	t := newTracker(totalBytes, totalEntries, p)
+	t := newTracker(totalBytes, p)
 
 	f, err := os.Open(src)
 	if err != nil {
@@ -107,7 +105,6 @@ func extractTar(ctx context.Context, src, targetDir string, limits Limits, p Pro
 				return err
 			}
 		case tar.TypeReg, tar.TypeRegA:
-			t.setCurrent(normName(h.Name))
 			if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 				return err
 			}
@@ -130,7 +127,6 @@ func extractTar(ctx context.Context, src, targetDir string, limits Limits, p Pro
 				return fmt.Errorf("close %q: %w", dest, closeErr)
 			}
 			_ = os.Chmod(dest, os.FileMode(h.Mode).Perm())
-			t.entryDone()
 		default:
 			// 符号链接/硬链接/其他类型跳过（安全考虑）
 		}

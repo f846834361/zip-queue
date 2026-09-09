@@ -27,9 +27,6 @@ type Task struct {
 	ProgressPercent  int        `json:"progress_percent"`
 	ProcessedBytes   int64      `json:"processed_bytes"`
 	TotalBytes       int64      `json:"total_bytes"`
-	ProcessedEntries int        `json:"processed_entries"`
-	TotalEntries     int        `json:"total_entries"`
-	CurrentEntry     string     `gorm:"size:1024" json:"current_entry"`
 	Error            string     `gorm:"size:2048" json:"error"`
 	// CompressionLevel 记录该压缩任务执行时实际使用的压缩效率档位
 	// （fastest/fast/normal/slow）；解压任务不涉及压缩效率变更，此项为空。

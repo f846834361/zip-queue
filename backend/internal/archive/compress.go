@@ -121,7 +121,7 @@ func Compress(ctx context.Context, src, destZip string, level Level, p ProgressF
 		_ = out.Close()
 	}()
 
-	t := newTracker(totalBytes, len(files), p)
+	t := newTracker(totalBytes, p)
 	for _, fpath := range files {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -131,7 +131,6 @@ func Compress(ctx context.Context, src, destZip string, level Level, p ProgressF
 			return err
 		}
 		rel = filepath.ToSlash(rel)
-		t.setCurrent(rel)
 		info, err := os.Stat(fpath)
 		if err != nil {
 			return err
@@ -156,7 +155,6 @@ func Compress(ctx context.Context, src, destZip string, level Level, p ProgressF
 		if copyErr != nil {
 			return copyErr
 		}
-		t.entryDone()
 	}
 	t.notify(true)
 	// 依次关闭 zip writer 与文件句柄：Close 负责 flush deflate 缓冲并写入

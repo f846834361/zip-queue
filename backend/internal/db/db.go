@@ -30,6 +30,14 @@ func Open(dbPath string, logLevel string) (*gorm.DB, error) {
 	if err := gdb.AutoMigrate(&model.Task{}, &model.Password{}, &model.Setting{}); err != nil {
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
+	// 移除历史遗留的"条目进度"列（processed_entries / total_entries / current_entry）。
+	// GORM AutoMigrate 不会自动删列，这里显式清理。
+	m := gdb.Migrator()
+	for _, col := range []string{"processed_entries", "total_entries", "current_entry"} {
+		if m.HasColumn(&model.Task{}, col) {
+			_ = m.DropColumn(&model.Task{}, col)
+		}
+	}
 	return gdb, nil
 }
 

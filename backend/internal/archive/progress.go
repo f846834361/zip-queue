@@ -5,13 +5,12 @@ import (
 	"time"
 )
 
-// Progress 描述任务执行的当前进度快照。
+// Progress 描述任务执行的当前进度快照（按字节计）。
+// 每个任务只处理单个源（文件/文件夹/压缩包），不再有内部"条目"概念，
+// 因此进度仅以字节为基础，由 Percent() 给出 0-100。
 type Progress struct {
-	ProcessedBytes   int64
-	TotalBytes       int64
-	ProcessedEntries int
-	TotalEntries     int
-	CurrentEntry     string
+	ProcessedBytes int64
+	TotalBytes     int64
 }
 
 // Percent 返回 0-100 进度；totalBytes 未知（0）时返回 -1（不确定）。
@@ -35,27 +34,19 @@ type ProgressFn func(p Progress)
 const progressThrottle = 256 * time.Millisecond
 
 type tracker struct {
-	totalBytes       int64
-	totalEntries     int
-	processedBytes   int64
-	processedEntries int
-	current          string
-	fn               ProgressFn
-	last             time.Time
+	totalBytes     int64
+	processedBytes int64
+	fn             ProgressFn
+	last           time.Time
 }
 
-func newTracker(totalBytes int64, totalEntries int, fn ProgressFn) *tracker {
+// newTracker 仅记录总字节与目标回调；条目进度已移除。
+func newTracker(totalBytes int64, fn ProgressFn) *tracker {
 	return &tracker{
-		totalBytes:   totalBytes,
-		totalEntries: totalEntries,
-		fn:           fn,
-		last:         time.Now(),
+		totalBytes: totalBytes,
+		fn:         fn,
+		last:       time.Now(),
 	}
-}
-
-func (t *tracker) setCurrent(name string) {
-	t.current = name
-	t.notify(true)
 }
 
 func (t *tracker) addBytes(n int64) {
@@ -66,18 +57,10 @@ func (t *tracker) addBytes(n int64) {
 	t.notify(false)
 }
 
-func (t *tracker) entryDone() {
-	t.processedEntries++
-	t.notify(true)
-}
-
 func (t *tracker) snapshot() Progress {
 	return Progress{
-		ProcessedBytes:   t.processedBytes,
-		TotalBytes:       t.totalBytes,
-		ProcessedEntries: t.processedEntries,
-		TotalEntries:     t.totalEntries,
-		CurrentEntry:     t.current,
+		ProcessedBytes: t.processedBytes,
+		TotalBytes:     t.totalBytes,
 	}
 }
 

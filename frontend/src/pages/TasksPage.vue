@@ -287,9 +287,6 @@ onMounted(fetchList)
             />
             <div class="text-caption text-grey-7">
               {{ props.row.progress_percent }}%
-              <template v-if="props.row.status === 'running' && props.row.current_entry">
-                — {{ props.row.current_entry }}
-              </template>
             </div>
           </q-td>
         </template>

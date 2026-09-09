@@ -51,17 +51,15 @@ func extractZip(ctx context.Context, src, targetDir string, passwords []string, 
 	}
 	strip := determineStrip(entries)
 	var totalBytes int64
-	totalEntries := 0
 	for _, e := range entries {
 		if !e.isDir {
 			totalBytes += e.size
-			totalEntries++
 		}
 	}
 	if limits.MaxTotalBytes > 0 && totalBytes > limits.MaxTotalBytes {
 		return fmt.Errorf("%w：压缩包解压后约 %d 字节，超过上限 %d", ErrLimitExceeded, totalBytes, limits.MaxTotalBytes)
 	}
-	t := newTracker(totalBytes, totalEntries, p)
+	t := newTracker(totalBytes, p)
 
 	for _, f := range r.File {
 		if ctx.Err() != nil {
@@ -81,7 +79,6 @@ func extractZip(ctx context.Context, src, targetDir string, passwords []string, 
 			}
 			continue
 		}
-		t.setCurrent(normName(f.Name))
 		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 			return err
 		}
@@ -114,7 +111,6 @@ func extractZip(ctx context.Context, src, targetDir string, passwords []string, 
 			return fmt.Errorf("close %q: %w", dest, closeErr)
 		}
 		_ = os.Chmod(dest, f.Mode().Perm())
-		t.entryDone()
 	}
 	t.notify(true)
 	return nil

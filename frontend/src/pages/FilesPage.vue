@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
-import { useQuasar } from 'quasar'
+import { computed, nextTick, onMounted, ref } from 'vue'
+import { useQuasar, QInput } from 'quasar'
 import api, { type AppConfig, type FsEntry } from '../api'
 import { useBrowseStore } from '../stores/browse'
 import { formatDateTime, formatSize } from '../utils/format'
@@ -16,6 +16,37 @@ const loading = ref(false)
 // 用 Set 保存选中路径：勾选态查找 O(1)，避免大目录下 O(n·m) 的 includes 扫描
 const selected = ref<Set<string>>(new Set())
 const submitting = ref(false)
+
+// 地址栏编辑态：true 时显示可输入路径输入框，false 时显示面包屑导航。
+const editing = ref(false)
+const pathInputRef = ref<InstanceType<typeof QInput> | null>(null)
+
+// 进入编辑态：聚焦输入框并全选当前路径，便于直接覆盖输入。
+function startEdit() {
+  if (editing.value) return
+  editing.value = true
+  manualPath.value = currentPath.value
+  nextTick(() => {
+    const el = pathInputRef.value
+    el?.focus()
+    el?.select?.()
+  })
+}
+
+// 退出编辑态：回归面包屑导航（未提交的输入作废）。用于 Esc。
+function cancelEdit() {
+  editing.value = false
+}
+
+// 失焦提交：若输入地址与原地址不同，则跳转到新地址；地址不存在时 load 报错
+// 且不改写 currentPath，自然保持原面包屑（不跳转）。用于输入框 blur。
+function commitEdit() {
+  const p = manualPath.value.trim()
+  if (p && p !== currentPath.value) {
+    void load(p)
+  }
+  editing.value = false
+}
 
 // 是否穿透子文件夹，来自配置页的全局开关（默认关闭）
 const penetrateSubfolders = computed(() => !!config.value?.penetrate_subfolders)
@@ -70,7 +101,11 @@ function openDir(row: FsEntry) {
 
 function submitManualPath() {
   const p = manualPath.value.trim()
-  if (!p) return
+  if (!p) {
+    editing.value = false
+    return
+  }
+  editing.value = false
   void load(p)
 }
 
@@ -163,7 +198,7 @@ async function handleCompress() {
       if (items.length === 0) return
       const go = await confirmAction(
         '确认压缩',
-        `将为选中的 ${items.length} 项（文件/文件夹）创建压缩任务并生成同名 .zip，任务完成后会删除原文件/文件夹。是否继续？`
+        `将为选中的 ${items.length} 项创建压缩任务并生成同名 .zip（每个选中的文件夹整体压缩为一个包，不展开其子文件夹），任务完成后会删除原文件/文件夹。是否继续？`
       )
       if (go) await addToQueue('compress')
       return
@@ -270,35 +305,33 @@ function onUpdateSelected(val: readonly FsEntry[]) {
 <template>
   <q-page padding>
     <q-card flat bordered class="q-mb-md">
-      <q-card-section class="q-pb-none">
+      <q-card-section>
         <div class="row items-center q-gutter-sm">
-          <q-input
-            v-model="manualPath"
-            label="手动输入绝对路径"
-            outlined
-            dense
-            class="col"
-            clearable
-            @keyup.enter="submitManualPath"
-          />
-          <q-btn color="primary" icon="arrow_forward" label="前往" unelevated @click="submitManualPath" />
+          <!-- 地址栏：默认显示面包屑（点击路径跳转）；点击/聚焦切换为输入框，失焦回归面包屑 -->
+          <div class="col address-bar row items-center" tabindex="0" @click="startEdit">
+            <q-breadcrumbs v-show="!editing" gutter="xs" class="text-body2 col">
+              <q-breadcrumbs-el
+                v-for="(seg, idx) in breadcrumbSegments"
+                :key="idx"
+                :label="seg.label"
+                icon="folder"
+                @click.stop="load(seg.path)"
+              />
+            </q-breadcrumbs>
+            <q-input
+              v-show="editing"
+              ref="pathInputRef"
+              v-model="manualPath"
+              outlined
+              dense
+              class="col"
+              @keyup.enter="submitManualPath"
+              @keyup.esc="cancelEdit"
+              @blur="commitEdit"
+            />
+          </div>
           <q-btn color="secondary" icon="arrow_upward" label="上级" outline @click="goUp" />
           <q-btn color="grey-7" icon="refresh" label="刷新" flat @click="load(currentPath)" />
-        </div>
-      </q-card-section>
-
-      <q-card-section class="q-pt-md">
-        <q-breadcrumbs gutter="sm" class="text-body2">
-          <q-breadcrumbs-el
-            v-for="(seg, idx) in breadcrumbSegments"
-            :key="idx"
-            :label="seg.label"
-            icon="folder"
-            @click="load(seg.path)"
-          />
-        </q-breadcrumbs>
-        <div v-if="currentPath" class="text-caption text-grey-7 q-mt-xs mono">
-          {{ currentPath }}
         </div>
       </q-card-section>
     </q-card>
@@ -398,3 +431,16 @@ function onUpdateSelected(val: readonly FsEntry[]) {
     </q-card>
   </q-page>
 </template>
+
+<style scoped>
+/* 融合后的地址栏：面包屑态可点击切换为输入框，整条区域高亮提示可交互 */
+.address-bar {
+  min-height: 40px;
+  border-radius: 4px;
+  padding: 2px 6px;
+  cursor: text;
+}
+.address-bar:hover {
+  background: rgba(0, 0, 0, 0.04);
+}
+</style>

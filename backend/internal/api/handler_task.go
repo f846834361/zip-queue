@@ -145,10 +145,13 @@ func (a *API) CreateTasksBatch(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "invalid type: " + req.Type})
 		return
 	}
-	seen := make(map[string]struct{}, len(req.Paths))
-	tasks := make([]model.Task, 0, len(req.Paths))
+	// 勾选即创建：每个选中的路径对应一条任务，文件夹整体压缩为一个 .zip，
+	// 不展开到其子项（不穿透）。不勾选时的批量压缩才由配置的穿透开关决定。
+	paths := req.Paths
+	seen := make(map[string]struct{}, len(paths))
+	tasks := make([]model.Task, 0, len(paths))
 	skipped := 0
-	for _, p := range req.Paths {
+	for _, p := range paths {
 		if p == "" {
 			skipped++
 			continue
@@ -174,7 +177,7 @@ func (a *API) CreateTasksBatch(c *gin.Context) {
 		return
 	}
 	// 过滤已有进行中任务的路径，避免同源任务并发执行互相冲突
-	paths := make([]string, 0, len(tasks))
+	paths = make([]string, 0, len(tasks))
 	for _, t := range tasks {
 		paths = append(paths, t.SourcePath)
 	}

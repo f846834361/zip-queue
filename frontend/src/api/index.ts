@@ -37,9 +37,6 @@ export interface Task {
   progress_percent: number
   processed_bytes: number
   total_bytes: number
-  processed_entries: number
-  total_entries: number
-  current_entry: string
   error: string
   requeue_count: number
   /** 压缩任务执行时实际使用的效率档位；解压任务及历史记录为 null/缺省。 */
