@@ -157,7 +157,12 @@ func (r *Runner) runCompress(ctx context.Context, task *model.Task) {
 	_ = os.RemoveAll(tempZip)
 	r.setTempTarget(task, tempZip, target)
 
-	if err := archive.Compress(ctx, src, tempZip, loadCompressionLevel(r.db), r.progressFn(task)); err != nil {
+	// 任务开始执行时取一次压缩效率档位（与密码同样执行期读库），并记录到任务，
+	// 使任务详情可回显"当时实际使用的效率"，即使之后在配置页改动也不受影响。
+	level := loadCompressionLevel(r.db)
+	r.updateTask(task.ID, map[string]interface{}{"compression_level": string(level)}, "写入压缩效率档位")
+
+	if err := archive.Compress(ctx, src, tempZip, level, r.progressFn(task)); err != nil {
 		if ctx.Err() != nil {
 			// 服务停止/重启导致的中断：删除临时文件，可安全重做的补一条待执行任务
 			FinishInterrupted(r.db, task)

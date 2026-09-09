@@ -311,17 +311,25 @@ onMounted(() => {
               「特快」仅打包不压缩，速度最快、体积最大；越慢压缩率越高、耗时越长。仅影响此后开始的任务。
             </div>
           </div>
-          <q-select
+          <q-tabs
             v-model="compressionLevel"
-            :options="compressionOptions"
-            :disable="savingTaskSettings"
-            outlined
             dense
-            emit-value
-            map-options
-            style="width: 180px"
+            no-caps
+            inline-label
+            active-color="primary"
+            indicator-color="primary"
+            align="left"
+            class="compression-tabs rounded-borders q-pa-xs"
             @update:model-value="onCompressionChange"
-          />
+          >
+            <q-tab
+              v-for="opt in compressionOptions"
+              :key="opt.value"
+              :name="opt.value"
+              :label="opt.label"
+              :disable="savingTaskSettings"
+            />
+          </q-tabs>
         </div>
       </q-card-section>
     </q-card>
@@ -448,5 +456,12 @@ onMounted(() => {
   box-shadow:
     inset 0 1px 0 rgba(0, 0, 0, 0.12),
     inset 0 -1px 0 rgba(0, 0, 0, 0.12);
+}
+
+// 压缩效率：让 q-tabs 看起来像一组分段按钮
+.compression-tabs {
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  background: rgba(0, 0, 0, 0.02);
+  min-width: 220px;
 }
 </style>

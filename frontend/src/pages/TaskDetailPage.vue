@@ -4,7 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { useQuasar } from 'quasar'
 import api, { type Task } from '../api'
 import { formatDateTime, formatSize } from '../utils/format'
-import { POLL_INTERVAL, statusColor, statusLabel, typeLabel } from '../utils/task'
+import { POLL_INTERVAL, statusColor, statusLabel, typeLabel, compressionLabel } from '../utils/task'
 import { usePolling } from '../composables/usePolling'
 
 const props = defineProps<{ id?: string }>()
@@ -168,6 +168,14 @@ onMounted(loadInitial)
               v-if="task"
               :color="statusColor(task.status)"
               :label="statusLabel(task.status)"
+              class="q-mt-xs"
+            />
+          </div>
+          <div v-if="task && task.type === 'compress'" class="col-12 col-md-6">
+            <div class="text-caption text-grey-7">压缩效率</div>
+            <q-badge
+              color="indigo"
+              :label="compressionLabel(task.compression_level)"
               class="q-mt-xs"
             />
           </div>

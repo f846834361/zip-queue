@@ -31,6 +31,9 @@ type Task struct {
 	TotalEntries     int        `json:"total_entries"`
 	CurrentEntry     string     `gorm:"size:1024" json:"current_entry"`
 	Error            string     `gorm:"size:2048" json:"error"`
+	// CompressionLevel 记录该压缩任务执行时实际使用的压缩效率档位
+	// （fastest/fast/normal/slow）；解压任务不涉及压缩效率变更，此项为空。
+	CompressionLevel string `gorm:"size:16" json:"compression_level"`
 	// RequeueCount 记录该任务因「服务中断」被自动重新排队的次数（用于限制无限重排）。
 	RequeueCount     int        `json:"requeue_count"`
 	CreatedAt        time.Time  `gorm:"index" json:"created_at"`

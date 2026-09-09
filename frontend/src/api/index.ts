@@ -42,6 +42,8 @@ export interface Task {
   current_entry: string
   error: string
   requeue_count: number
+  /** 压缩任务执行时实际使用的效率档位；解压任务及历史记录为 null/缺省。 */
+  compression_level?: 'fastest' | 'fast' | 'normal' | 'slow' | null
   created_at: string
   started_at: string | null
   completed_at: string | null
