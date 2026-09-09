@@ -17,7 +17,7 @@ COPY --from=frontend-builder /app/frontend/dist ./web/dist/
 RUN CGO_ENABLED=0 go build -tags netgo -ldflags "-s -w" -o /out/zip-queue ./cmd/zip-queue
 
 # === Stage 3: 运行时 ===
-FROM alpine:3.20
+FROM alpine:3.21
 RUN apk add --no-cache ca-certificates tzdata
 WORKDIR /app
 COPY --from=backend-builder /out/zip-queue ./zip-queue
