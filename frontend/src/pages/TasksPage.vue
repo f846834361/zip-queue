@@ -154,13 +154,13 @@ onBeforeUnmount(() => {
   if (filterTimer) clearTimeout(filterTimer)
 })
 
-function resetFilters() {
-  filters.status = ''
-  filters.type = ''
-  filters.source_path = ''
-  filters.completed_after = ''
-  filters.completed_before = ''
-}
+// function resetFilters() {
+//   filters.status = ''
+//   filters.type = ''
+//   filters.source_path = ''
+//   filters.completed_after = ''
+//   filters.completed_before = ''
+// }
 
 function openDetail(row: Task) {
   void router.push({ name: 'task-detail', params: { id: row.id } })
