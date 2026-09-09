@@ -25,6 +25,17 @@ export interface FsEntry {
 export interface ListDirResponse {
   path: string
   entries: FsEntry[]
+  /** 所列出目录的最后修改时间（unix 秒），供轮询对比是否需要刷新 */
+  modified: number
+}
+
+export interface FileStatusResponse {
+  /** 目录最后修改时间（unix 秒）；为 0 表示路径不存在/无效 */
+  modified: number
+  /** 当前路径（含子路径）是否有进行中的任务 */
+  active: boolean
+  /** 进行中任务数量 */
+  active_count: number
 }
 
 export interface Task {
@@ -104,6 +115,9 @@ export const api = {
   async listDir(path?: string): Promise<ListDirResponse> {
     const params = path ? { path } : {}
     return (await http.get<ListDirResponse>('/fs/list', { params })).data
+  },
+  async getFileStatus(path: string): Promise<FileStatusResponse> {
+    return (await http.get<FileStatusResponse>('/file/status', { params: { path } })).data
   },
   async createTask(type: 'decompress' | 'compress', path: string): Promise<Task> {
     return (await http.post<Task>('/tasks', { type, path })).data
