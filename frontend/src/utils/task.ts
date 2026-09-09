@@ -3,6 +3,22 @@
 /** 运行中任务的轮询刷新间隔（毫秒）。 */
 export const POLL_INTERVAL = 2000
 
+/** 压缩效率档位 → 中文名（配置页下拉框与顶栏展示共用，保证文案一致）。 */
+export const COMPRESSION_LABELS = {
+  fastest: '特快',
+  fast: '快',
+  normal: '中',
+  slow: '慢'
+} as const
+
+export type CompressionLevel = keyof typeof COMPRESSION_LABELS
+
+/** 压缩效率中文名；未知取值回落"中"（与后端默认档位一致）。 */
+export function compressionLabel(level: string | null | undefined): string {
+  if (!level) return COMPRESSION_LABELS.normal
+  return COMPRESSION_LABELS[level as CompressionLevel] ?? COMPRESSION_LABELS.normal
+}
+
 export function statusColor(status: string): string {
   switch (status) {
     case 'pending': return 'grey-6'

@@ -3,6 +3,7 @@ import { computed, onMounted } from 'vue'
 import { useQuasar } from 'quasar'
 import { useUiStore } from '../stores/ui'
 import { useBrowseStore } from '../stores/browse'
+import { compressionLabel } from '../utils/task'
 
 const $q = useQuasar()
 
@@ -39,12 +40,16 @@ onMounted(async () => {
       <q-toolbar>
         <q-btn dense flat round icon="menu" @click="leftDrawerOpen = !leftDrawerOpen" />
         <q-toolbar-title class="text-weight-medium">
-          <q-icon name="archive" size="24px" class="q-mr-sm" />
-          Zip-Queue
+          <!-- 点击 logo 回到文件浏览页；用 router-link 保留可访问性与右键/中键打开能力 -->
+          <router-link :to="{ name: 'files' }" class="logo-link text-white">
+            <q-icon name="archive" size="24px" class="q-mr-sm" />
+            Zip-Queue
+          </router-link>
         </q-toolbar-title>
         <template v-if="config">
           <q-chip dense square color="white" text-color="primary" class="q-mr-none">
-            并发 {{ config.max_concurrent_tasks }}
+            压缩效率 {{ compressionLabel(config.compression_level) }}
+            <q-tooltip>当前压缩效率，可在配置页修改</q-tooltip>
           </q-chip>
         </template>
       </q-toolbar>
@@ -75,3 +80,13 @@ onMounted(async () => {
     </q-page-container>
   </q-layout>
 </template>
+
+<style scoped>
+.logo-link {
+  text-decoration: none;
+  cursor: pointer;
+}
+.logo-link:hover {
+  opacity: 0.85;
+}
+</style>

@@ -6,13 +6,17 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
+
+	"gorm.io/gorm"
 
 	"zip-queue/internal/archive"
 	"zip-queue/internal/config"
 	"zip-queue/internal/db"
 	"zip-queue/internal/server"
+	"zip-queue/internal/setting"
 	"zip-queue/internal/worker"
 )
 
@@ -24,13 +28,18 @@ func main() {
 	if err != nil {
 		log.Fatalf("load config: %v", err)
 	}
-	log.Printf("zip-queue starting: port=%d db=%s concurrency=%d",
-		cfg.Server.Port, cfg.DB.Path, cfg.Worker.MaxConcurrentTasks)
 
 	gdb, err := db.Open(cfg.DB.Path, cfg.Log.Level)
 	if err != nil {
 		log.Fatalf("open db: %v", err)
 	}
+
+	// 并发数与压缩效率可在配置页修改并持久化在 settings 表，启动时读回覆盖 yaml/env 默认值，
+	// 避免页面显示与 pool 实际并发不一致。
+	concurrency := resolveConcurrency(cfg.Worker.MaxConcurrentTasks, gdb)
+	compression := archive.ParseLevel(setting.Get(gdb, setting.KeyCompressionLevel))
+	log.Printf("zip-queue starting: port=%d db=%s concurrency=%d compression=%s",
+		cfg.Server.Port, cfg.DB.Path, concurrency, compression)
 	defer func() {
 		if sqlDB, err := gdb.DB(); err == nil {
 			_ = sqlDB.Close()
@@ -47,7 +56,7 @@ func main() {
 	}
 
 	runner := worker.NewRunner(gdb, archive.Limits{MaxTotalBytes: cfg.Worker.MaxExtractTotalBytes})
-	pool := worker.NewPool(gdb, runner, cfg.Worker.MaxConcurrentTasks)
+	pool := worker.NewPool(gdb, runner, concurrency)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -78,4 +87,18 @@ func main() {
 		log.Println("warning: workers 未在 30s 内收尾，强制退出")
 	}
 	log.Println("zip-queue stopped")
+}
+
+// resolveConcurrency 决定启动时的并发数：settings 表中保存的页面配置优先，
+// 未保存或值非法时回落 yaml/env 默认值；结果夹紧到合法范围。
+func resolveConcurrency(yamlDefault int, gdb *gorm.DB) int {
+	if v := setting.Get(gdb, setting.KeyMaxConcurrentTasks); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			log.Printf("忽略非法的 max_concurrent_tasks 配置 %q：%v", v, err)
+		} else {
+			return setting.ClampConcurrency(n)
+		}
+	}
+	return setting.ClampConcurrency(yamlDefault)
 }

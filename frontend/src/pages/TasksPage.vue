@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
+import { onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useQuasar } from 'quasar'
 import api, { type Task } from '../api'
@@ -133,10 +133,26 @@ function onRowClick(_evt: unknown, row: Task) {
   openDetail(row)
 }
 
-function applyFilters() {
-  page.value = 1
-  void fetchList()
-}
+// 实时筛选：条件变化后防抖自动刷新，无需点击"筛选"按钮，
+// 输入过程中也不会每敲一个字就发请求。
+const FILTER_DEBOUNCE_MS = 400
+let filterTimer: ReturnType<typeof setTimeout> | undefined
+
+watch(
+  filters,
+  () => {
+    if (filterTimer) clearTimeout(filterTimer)
+    filterTimer = setTimeout(() => {
+      page.value = 1
+      void fetchList()
+    }, FILTER_DEBOUNCE_MS)
+  },
+  { deep: true }
+)
+
+onBeforeUnmount(() => {
+  if (filterTimer) clearTimeout(filterTimer)
+})
 
 function resetFilters() {
   filters.status = ''
@@ -144,8 +160,6 @@ function resetFilters() {
   filters.source_path = ''
   filters.completed_after = ''
   filters.completed_before = ''
-  page.value = 1
-  void fetchList()
 }
 
 function openDetail(row: Task) {
@@ -215,10 +229,15 @@ onMounted(fetchList)
             <date-time-picker v-model="filters.completed_before" label="完成时间到" default-time="23:59" />
           </div>
           <div class="col-12 col-md-1">
-            <div class="row q-gutter-xs">
-              <q-btn color="primary" icon="search" label="筛选" unelevated dense @click="applyFilters" class="full-width" />
-              <q-btn color="grey-7" icon="restart_alt" label="重置" flat dense @click="resetFilters" class="full-width" />
-            </div>
+            <!-- <q-btn
+              color="grey-7"
+              icon="restart_alt"
+              label="重置"
+              flat
+              dense
+              @click="resetFilters"
+              class="full-width"
+            /> -->
           </div>
         </div>
       </q-card-section>

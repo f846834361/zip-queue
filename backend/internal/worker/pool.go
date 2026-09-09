@@ -10,27 +10,48 @@ import (
 	"gorm.io/gorm"
 
 	"zip-queue/internal/model"
+	"zip-queue/internal/setting"
 )
 
 // Pool 管理并发 worker：从 DB 取 pending 任务、原子认领、分发给 runner。
 type Pool struct {
 	db     *gorm.DB
 	runner *Runner
-	sem    chan struct{}  // 并发槽（容量 = max_concurrent）
 	wake   chan struct{}  // 非阻塞唤醒信号
 	wg     sync.WaitGroup // 跟踪进行中的 worker
+
+	// 并发控制：max 为上限（可在运行期调整），running 为已派发且未结束的任务数。
+	// 用计数器而非固定容量 channel，使并发上限可以被配置页热更新。
+	mu      sync.Mutex
+	max     int
+	running int
 }
 
 func NewPool(db *gorm.DB, runner *Runner, concurrency int) *Pool {
-	if concurrency < 1 {
-		concurrency = 1
-	}
 	return &Pool{
 		db:     db,
 		runner: runner,
-		sem:    make(chan struct{}, concurrency),
 		wake:   make(chan struct{}, 1),
+		max:    setting.ClampConcurrency(concurrency),
 	}
+}
+
+// SetConcurrency 调整并发上限（夹紧到合法范围），返回实际生效值。
+// 调大时唤醒调度器立即补派任务；调小时不打断已派发任务，其结束后按新上限派发。
+func (p *Pool) SetConcurrency(n int) int {
+	p.mu.Lock()
+	p.max = setting.ClampConcurrency(n)
+	next := p.max
+	p.mu.Unlock()
+	p.Enqueue()
+	return next
+}
+
+// Concurrency 返回当前并发上限。
+func (p *Pool) Concurrency() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.max
 }
 
 // Start 启动调度循环。返回后立即开始处理 pending 任务。
@@ -49,6 +70,24 @@ func (p *Pool) Enqueue() {
 // Wait 阻塞直到所有进行中的 worker 结束（用于优雅关闭）。
 func (p *Pool) Wait() {
 	p.wg.Wait()
+}
+
+// tryAcquire 非阻塞占用一个并发槽，槽位已满返回 false。
+func (p *Pool) tryAcquire() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.running >= p.max {
+		return false
+	}
+	p.running++
+	return true
+}
+
+// release 归还并发槽（不唤醒调度器，由调用方决定是否需要 Enqueue）。
+func (p *Pool) release() {
+	p.mu.Lock()
+	p.running--
+	p.mu.Unlock()
 }
 
 func (p *Pool) loop(ctx context.Context) {
@@ -72,9 +111,7 @@ func (p *Pool) dispatch(ctx context.Context) {
 	}
 	for {
 		// 尝试获取一个并发槽（非阻塞）
-		select {
-		case p.sem <- struct{}{}:
-		default:
+		if !p.tryAcquire() {
 			return // 槽位已满
 		}
 
@@ -86,11 +123,11 @@ func (p *Pool) dispatch(ctx context.Context) {
 			Limit(1).
 			Find(&tasks).Error
 		if err != nil {
-			<-p.sem
+			p.release()
 			return
 		}
 		if len(tasks) == 0 {
-			<-p.sem // 无 pending 任务，释放槽位
+			p.release() // 无 pending 任务，释放槽位
 			return
 		}
 		task := tasks[0]
@@ -104,17 +141,17 @@ func (p *Pool) dispatch(ctx context.Context) {
 				"started_at": time.Now(),
 			})
 		if res.Error != nil {
-			<-p.sem
+			p.release()
 			return
 		}
 		if res.RowsAffected == 0 {
-			<-p.sem // 已被其他实例认领，尝试下一个
+			p.release() // 已被其他实例认领，尝试下一个
 			continue
 		}
 
 		// 重新加载完整任务
 		if err := p.db.WithContext(ctx).First(&task, task.ID).Error; err != nil {
-			<-p.sem
+			p.release()
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return
 			}
@@ -132,7 +169,7 @@ func (p *Pool) dispatch(ctx context.Context) {
 		p.wg.Add(1)
 		go func(t model.Task) {
 			defer func() {
-				<-p.sem
+				p.release()
 				p.wg.Done()
 				p.Enqueue()
 			}()

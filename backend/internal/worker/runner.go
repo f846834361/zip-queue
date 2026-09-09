@@ -14,6 +14,7 @@ import (
 
 	"zip-queue/internal/archive"
 	"zip-queue/internal/model"
+	"zip-queue/internal/setting"
 )
 
 // TempDirPrefix 是任务执行期临时目录/临时文件名前缀。
@@ -32,6 +33,12 @@ func loadPasswords(db *gorm.DB) []string {
 		out = append(out, p.Value)
 	}
 	return out
+}
+
+// loadCompressionLevel 读取压缩效率档位（任务开始时取一次，未设置回落默认档）。
+// 与密码同样在任务执行时读库，使页面改配置只影响之后开始的任务。
+func loadCompressionLevel(db *gorm.DB) archive.Level {
+	return archive.ParseLevel(setting.Get(db, setting.KeyCompressionLevel))
 }
 
 // Runner 执行单个任务（解压或压缩）的全部副作用：临时目录、进度落库、替换原文件、清理。
@@ -150,7 +157,7 @@ func (r *Runner) runCompress(ctx context.Context, task *model.Task) {
 	_ = os.RemoveAll(tempZip)
 	r.setTempTarget(task, tempZip, target)
 
-	if err := archive.Compress(ctx, src, tempZip, r.progressFn(task)); err != nil {
+	if err := archive.Compress(ctx, src, tempZip, loadCompressionLevel(r.db), r.progressFn(task)); err != nil {
 		if ctx.Err() != nil {
 			// 服务停止/重启导致的中断：删除临时文件，可安全重做的补一条待执行任务
 			FinishInterrupted(r.db, task)

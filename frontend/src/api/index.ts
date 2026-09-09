@@ -63,6 +63,15 @@ export interface AppConfig {
   max_concurrent_tasks: number
   default_browse_path: string
   penetrate_subfolders: boolean
+  /** 压缩效率：fastest 特快（仅打包）/ fast 快 / normal 中 / slow 慢 */
+  compression_level: 'fastest' | 'fast' | 'normal' | 'slow'
+}
+
+/** 可在配置页修改、提交到后端保存的字段（均为可选，只传需要变更的项）。 */
+export interface UpdateConfigBody {
+  penetrate_subfolders?: boolean
+  max_concurrent_tasks?: number
+  compression_level?: AppConfig['compression_level']
 }
 
 export interface BulkResponse {
@@ -90,7 +99,7 @@ export const api = {
   async getConfig(): Promise<AppConfig> {
     return (await http.get<AppConfig>('/config')).data
   },
-  async updateConfig(body: { penetrate_subfolders: boolean }): Promise<AppConfig> {
+  async updateConfig(body: UpdateConfigBody): Promise<AppConfig> {
     return (await http.put<AppConfig>('/config', body)).data
   },
   async listDir(path?: string): Promise<ListDirResponse> {
