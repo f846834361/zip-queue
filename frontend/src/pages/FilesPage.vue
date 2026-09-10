@@ -165,9 +165,7 @@ const breadcrumbSegments = computed(() => {
 const canDecompress = computed(() =>
     selectedEntries.value.some((e) => e.is_archive)
 )
-const canCompress = computed(() =>
-    selectedEntries.value.some((e) => !e.is_archive)
-)
+const canCompress = computed(() => selectedEntries.value.length > 0)
 
 // 通用二次确认弹窗，返回用户是否确认
 function confirmAction(title: string, message: string): Promise<boolean> {
@@ -187,7 +185,7 @@ function confirmAction(title: string, message: string): Promise<boolean> {
 // 当前目录可被批量解压/压缩的数量（供未勾选时提示）
 const bulkArchiveCount = computed(() => entries.value.filter((e) => e.is_archive).length)
 const bulkCompressibleCount = computed(
-    () => entries.value.filter((e) => !e.is_archive && (e.is_dir || e.size > 0)).length
+    () => entries.value.filter((e) => e.is_dir || e.size > 0).length
 )
 
 async function handleDecompress() {
@@ -209,8 +207,8 @@ async function handleDecompress() {
       return
     }
     const scopeText = penetrateSubfolders.value
-        ? '开启穿透：将连同当前目录所有子文件夹中的压缩包一起创建解压任务'
-        : '仅处理当前目录中的压缩包（不进入子目录）'
+        ? '当前目录及其子文件夹中的压缩包一起创建解压任务'
+        : '仅处理当前目录中的压缩包'
     const go = await confirmAction(
         '确认批量解压',
         `当前目录下共有 ${bulkArchiveCount.value} 个压缩包。${scopeText}，任务完成后会删除对应的原压缩包。是否继续？`
@@ -226,11 +224,11 @@ async function handleCompress() {
   submitting.value = true
   try {
     if (selected.value.size > 0) {
-      const items = selectedEntries.value.filter((e) => !e.is_archive)
+      const items = selectedEntries.value
       if (items.length === 0) return
       const go = await confirmAction(
           '确认压缩',
-          `将为选中的 ${items.length} 项创建压缩任务并生成同名 .zip（每个选中的文件夹整体压缩为一个包，不展开其子文件夹），任务完成后会删除原文件/文件夹。是否继续？`
+          `将为选中的 ${items.length} 项创建压缩任务并生成同名 .zip，任务完成后会删除原文件/文件夹。是否继续？`
       )
       if (go) await addToQueue('compress')
       return
@@ -242,11 +240,11 @@ async function handleCompress() {
     const go = penetrateSubfolders.value
         ? await confirmAction(
             '确认批量压缩',
-            '开启穿透：将穿透当前目录所有子文件夹，把其中每个文件（非压缩包）单独创建压缩任务（文件夹本身不压缩），任务完成后会删除原文件。是否继续？'
+            '开启穿透：将穿透当前目录所有子文件夹，把其中每个文件单独创建压缩任务（文件夹本身不压缩，压缩包同样参与），任务完成后会删除原文件。是否继续？'
         )
         : await confirmAction(
             '确认批量压缩',
-            `将把当前目录下除压缩包外的 ${bulkCompressibleCount.value} 项内容全部压缩为同名 .zip（不进入子目录），任务完成后会删除原文件/文件夹。是否继续？`
+            `将把当前目录下 ${bulkCompressibleCount.value} 项内容全部压缩为同名 .zip（不进入子目录，压缩包同样参与），任务完成后会删除原文件/文件夹。是否继续？`
         )
     if (go) await bulkCompress()
   } finally {
@@ -259,7 +257,7 @@ async function addToQueue(type: 'decompress' | 'compress') {
   const candidates =
       type === 'decompress'
           ? selectedEntries.value.filter((e) => e.is_archive)
-          : selectedEntries.value.filter((e) => !e.is_archive)
+          : selectedEntries.value
 
   if (candidates.length === 0) {
     $q.notify({

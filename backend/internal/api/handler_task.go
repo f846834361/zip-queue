@@ -65,10 +65,7 @@ func taskForPath(taskType, path string) (*model.Task, string) {
 			return nil, "path is not a supported archive"
 		}
 	case model.TypeCompress:
-		// 允许文件夹或任意文件（压缩包本身除外，压缩压缩包无意义）
-		if !info.IsDir() && archive.IsSupportedArchive(path) {
-			return nil, "compressing an existing archive is not allowed"
-		}
+		// 允许文件夹或任意文件（含压缩包，与其他文件同等处理）
 	default:
 		return nil, "invalid type: " + taskType
 	}
@@ -169,7 +166,7 @@ func (a *API) CreateTasksBatch(c *gin.Context) {
 		tasks = append(tasks, *t)
 	}
 	if len(tasks) == 0 {
-		msg := "所选内容中没有可创建的压缩任务（压缩包不支持再次压缩）"
+		msg := "所选内容中没有可创建的压缩任务"
 		if req.Type == model.TypeDecompress {
 			msg = "所选内容中没有可解压的压缩包"
 		}
@@ -276,7 +273,7 @@ func (a *API) BulkDecompress(c *gin.Context) {
 	c.JSON(201, gin.H{"created": len(ids), "ids": ids, "skipped": dupSkipped})
 }
 
-// BulkCompress 扫描文件夹下的非压缩包条目，每个创建独立压缩任务。
+// BulkCompress 扫描文件夹下的所有条目，每个创建独立压缩任务（压缩包与其他文件同等处理）。
 // recursive=false（默认）：当前目录下所有项目（文件夹+文件）都压缩。
 // recursive=true：穿透子文件夹，只压缩文件，不压缩文件夹本身。
 func (a *API) BulkCompress(c *gin.Context) {
@@ -305,10 +302,6 @@ func (a *API) BulkCompress(c *gin.Context) {
 		// 跳过任务执行期的临时目录，避免扫到运行中任务的产物
 		if d.IsDir() && strings.HasPrefix(d.Name(), worker.TempDirPrefix) {
 			return filepath.SkipDir
-		}
-		// 压缩包本身不压缩
-		if !d.IsDir() && archive.IsSupportedArchive(p) {
-			return nil
 		}
 		if d.IsDir() {
 			if recursive {
