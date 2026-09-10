@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useQuasar } from 'quasar'
 import api, { type AppConfig, type Password, type UpdateConfigBody } from '../api'
 import { useBrowseStore } from '../stores/browse'
@@ -8,8 +8,23 @@ import { COMPRESSION_LABELS, compressionLabel } from '../utils/task'
 const $q = useQuasar()
 const browseStore = useBrowseStore()
 
+interface TablePagination {
+  page: number
+  rowsPerPage: number
+  rowsNumber: number
+  sortBy: string | undefined
+  descending: boolean
+}
+
 const passwords = ref<Password[]>([])
 const loading = ref(false)
+const pagination = ref<TablePagination>({
+  page: 1,
+  rowsPerPage: 20,
+  rowsNumber: 0,
+  sortBy: undefined,
+  descending: false
+})
 const showDialog = ref(false)
 const editing = ref<Password | null>(null)
 const form = ref({ value: '', note: '' })
@@ -132,13 +147,66 @@ const columns = [
 async function fetchList() {
   loading.value = true
   try {
-    const resp = await api.listPasswords()
+    const resp = await api.listPasswords({
+      page: pagination.value.page,
+      page_size: pagination.value.rowsPerPage,
+      sort_by: pagination.value.sortBy,
+      desc: pagination.value.descending
+    })
     passwords.value = resp.items
+    pagination.value.rowsNumber = resp.total
+    // 删空最后一页等场景：当前页超出范围时回退到末页再拉取一次
+    const totalPages = Math.max(1, Math.ceil(resp.total / pagination.value.rowsPerPage))
+    if (pagination.value.page > totalPages) {
+      pagination.value.page = totalPages
+      const resp2 = await api.listPasswords({
+        page: pagination.value.page,
+        page_size: pagination.value.rowsPerPage,
+        sort_by: pagination.value.sortBy,
+        desc: pagination.value.descending
+      })
+      passwords.value = resp2.items
+      pagination.value.rowsNumber = resp2.total
+    }
   } catch (e) {
     $q.notify({ type: 'negative', message: (e as Error).message })
   } finally {
     loading.value = false
   }
+}
+
+// 服务端分页模式（pagination 含 rowsNumber）下，翻页 / 改每页条数 / 排序都通过 @request 通知，
+// 我们据此更新分页状态并向服务端重新拉取当前页
+function onRequest(props: {
+  pagination: {
+    page: number
+    rowsPerPage: number
+    rowsNumber?: number
+    sortBy: string | null
+    descending: boolean
+  }
+}) {
+  const p = props.pagination
+  pagination.value = {
+    ...pagination.value,
+    page: p.page,
+    rowsPerPage: p.rowsPerPage,
+    rowsNumber: p.rowsNumber ?? pagination.value.rowsNumber,
+    sortBy: p.sortBy ?? undefined,
+    descending: p.descending
+  }
+  void fetchList()
+}
+
+// 总页数，供 q-pagination 的 :max 使用
+const pageCount = computed(() =>
+  Math.max(1, Math.ceil(pagination.value.rowsNumber / pagination.value.rowsPerPage))
+)
+
+// 切换每页条数时回到第 1 页重新拉取
+function onRowsPerPageChange() {
+  pagination.value.page = 1
+  void fetchList()
 }
 
 // 正在切换状态的行 id，避免重复请求
@@ -231,8 +299,7 @@ async function remove(row: Password) {
   })
 }
 
-// 拖拽排序：拖动行到目标位置释放即可换序。
-// 后端 reorder 接口是"与相邻项交换位置"，故移动 N 位就调用 N 次，逻辑与原来的上移/下移一致。
+// 拖拽排序：拖动行释放到目标行即与目标行交换位置（一次调用交换两条记录）。
 const dragId = ref<number | null>(null)
 const dropId = ref<number | null>(null)
 const reordering = ref(false)
@@ -254,20 +321,12 @@ async function onDrop(row: Password) {
   const from = dragId.value
   onDragEnd()
   if (from === null || from === row.id || reordering.value) return
-  const fromIdx = passwords.value.findIndex((p) => p.id === from)
-  const toIdx = passwords.value.findIndex((p) => p.id === row.id)
-  if (fromIdx < 0 || toIdx < 0 || fromIdx === toIdx) return
-
-  const direction: -1 | 1 = toIdx > fromIdx ? 1 : -1
-  const steps = Math.abs(toIdx - fromIdx)
   reordering.value = true
   try {
-    for (let i = 0; i < steps; i++) {
-      await api.reorderPassword(from, direction)
-    }
+    // 与被拖放到的目标行直接交换位置（一次调用交换两条记录）
+    await api.reorderPassword(from, row.id)
     await fetchList()
-    // 相邻交换后被拖动的密码取得目标行原来的 sort_order
-    $q.notify({ type: 'positive', message: `密码${row.value}已变为序号 ${row.sort_order}` })
+    $q.notify({ type: 'positive', message: `已与「${row.value}」交换位置` })
   } catch (e) {
     $q.notify({ type: 'negative', message: (e as Error).message })
   } finally {
@@ -394,8 +453,10 @@ onMounted(() => {
           row-key="id"
           flat
           dense
-          :pagination="{ rowsPerPage: 0 }"
-          hide-pagination
+          v-model:pagination="pagination"
+          :rows-per-page-options="[20, 50, 100]"
+          :hide-pagination="true"
+          @request="onRequest"
           @row-click="onRowClick"
           :row-class="rowClass"
         >
@@ -445,6 +506,31 @@ onMounted(() => {
             <div class="full-width text-center text-grey q-pa-md">暂无密码</div>
           </template>
         </q-table>
+        <div
+          v-if="pagination.rowsNumber > 20"
+          class="row items-center justify-end q-mt-sm q-gutter-x-md"
+        >
+         <q-pagination
+            v-model="pagination.page"
+            :max="pageCount"
+            :max-pages="5"
+          
+            direction-links
+            @update:model-value="fetchList"
+          />
+          <q-select
+            v-model="pagination.rowsPerPage"
+            :options="[20, 50, 100]"
+            label="每页条数"
+            dense
+            outlined
+            hide-bottom-space
+            style="min-width: 110px"
+            @update:model-value="onRowsPerPageChange"
+          />
+         
+          <div class="text-body2 text-grey-7">共 {{ pagination.rowsNumber }} 条</div>
+        </div>
       </q-card-section>
     </q-card>
 

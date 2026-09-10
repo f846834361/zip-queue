@@ -240,11 +240,11 @@ async function handleCompress() {
     const go = penetrateSubfolders.value
         ? await confirmAction(
             '确认批量压缩',
-            '开启穿透：将穿透当前目录所有子文件夹，把其中每个文件单独创建压缩任务（文件夹本身不压缩，压缩包同样参与），任务完成后会删除原文件。是否继续？'
+            '将把当前目录下每个文件单独创建压缩任务,文件夹不压缩找子文件，任务完成后会删除原文件。是否继续？'
         )
         : await confirmAction(
             '确认批量压缩',
-            `将把当前目录下 ${bulkCompressibleCount.value} 项内容全部压缩为同名 .zip（不进入子目录，压缩包同样参与），任务完成后会删除原文件/文件夹。是否继续？`
+            `将把当前目录下 ${bulkCompressibleCount.value} 项内容全部压缩为同名 .zip，任务完成后会删除原文件/文件夹。是否继续？`
         )
     if (go) await bulkCompress()
   } finally {

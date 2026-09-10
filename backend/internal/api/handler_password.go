@@ -29,14 +29,49 @@ func (a *API) passwordExists(value string, excludeID uint) (bool, error) {
 	return count > 0, nil
 }
 
-// ListPasswords 返回全部密码，按 sort_order asc、id asc 排序。
+// ListPasswords 返回密码列表（分页 + 排序）。默认按 sort_order asc、id asc 排序。
+// 查询参数：page（默认 1）、page_size（默认 20，上限 200）、sort_by、desc。
 func (a *API) ListPasswords(c *gin.Context) {
-	var items []model.Password
-	if err := a.db.Order("sort_order asc, id asc").Find(&items).Error; err != nil {
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	pageSize, _ := strconv.Atoi(c.DefaultQuery("page_size", "20"))
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 || pageSize > 200 {
+		pageSize = 20
+	}
+
+	// 排序字段白名单，避免 SQL 注入
+	order := "sort_order asc, id asc"
+	if col, ok := map[string]string{
+		"value":      "value",
+		"note":       "note",
+		"enabled":    "enabled",
+		"sort_order": "sort_order",
+	}[c.Query("sort_by")]; ok {
+		dir := "asc"
+		if c.Query("desc") == "true" {
+			dir = "desc"
+		}
+		order = col + " " + dir
+	}
+
+	var total int64
+	if err := a.db.Model(&model.Password{}).Count(&total).Error; err != nil {
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(200, gin.H{"items": items, "total": len(items)})
+	var items []model.Password
+	if err := a.db.Order(order).Offset((page - 1) * pageSize).Limit(pageSize).Find(&items).Error; err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(200, gin.H{
+		"items":     items,
+		"total":     total,
+		"page":      page,
+		"page_size": pageSize,
+	})
 }
 
 // CreatePassword 新增一个密码。未指定 sort_order 时追加到末尾。
@@ -170,80 +205,44 @@ func (a *API) SetPasswordEnabled(c *gin.Context) {
 	c.JSON(200, pw)
 }
 
-// ReorderPasswords 将某密码与相邻密码交换位置（上移/下移一位）。
-// 请求体仅 {id, direction}：direction = -1 上移一位，1 下移一位，恒定小报文。
-// 相邻交换只改写两条记录的 sort_order，其余记录不动。
+// ReorderPasswords 将某密码与拖放目标密码交换位置（一次调用交换两条记录）。
+// 请求体 {id, target_id}：把 id 对应记录与 target_id 对应记录的 sort_order 互换。
+// 仅更新这两条记录，不涉及其余条目，也不重排全局顺序。
 func (a *API) ReorderPasswords(c *gin.Context) {
 	var req struct {
-		ID        uint `json:"id" binding:"required"`
-		Direction int  `json:"direction"`
+		ID       uint `json:"id" binding:"required"`
+		TargetID uint `json:"target_id" binding:"required"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(400, gin.H{"error": err.Error()})
 		return
 	}
-	if req.Direction != -1 && req.Direction != 1 {
-		c.JSON(400, gin.H{"error": "direction must be -1 (up) or 1 (down)"})
+	if req.ID == req.TargetID {
+		c.JSON(200, gin.H{"ok": true})
 		return
 	}
 
-	// 当前完整顺序
-	var list []model.Password
-	if err := a.db.Order("sort_order asc, id asc").Find(&list).Error; err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
-		return
-	}
-	cur := -1
-	for i := range list {
-		if list[i].ID == req.ID {
-			cur = i
-			break
-		}
-	}
-	if cur == -1 {
+	// 取出两条记录
+	var src, dst model.Password
+	if err := a.db.First(&src, req.ID).Error; err != nil {
 		c.JSON(404, gin.H{"error": "password not found"})
 		return
 	}
-	adj := cur + req.Direction
-	if adj < 0 || adj >= len(list) {
-		c.JSON(200, gin.H{"ok": true}) // 已在边界，无需处理
+	if err := a.db.First(&dst, req.TargetID).Error; err != nil {
+		c.JSON(404, gin.H{"error": "password not found"})
 		return
 	}
 
-	// 若存在重复 sort_order（历史脏数据），先整表归一化为 0..n-1，保证交换有意义。
-	duplicated := false
-	seen := make(map[int]struct{}, len(list))
-	for i := range list {
-		if _, ok := seen[list[i].SortOrder]; ok {
-			duplicated = true
-			break
-		}
-		seen[list[i].SortOrder] = struct{}{}
-	}
-
+	// 互换两条记录的 sort_order（单事务、两条 UPDATE）
 	tx := a.db.Begin()
-	if duplicated {
-		for i := range list {
-			if list[i].SortOrder == i {
-				continue
-			}
-			if err := tx.Model(&model.Password{}).Where("id = ?", list[i].ID).Update("sort_order", i).Error; err != nil {
-				tx.Rollback()
-				c.JSON(500, gin.H{"error": err.Error()})
-				return
-			}
-			list[i].SortOrder = i
-		}
-	}
-
-	// 交换相邻两条的 sort_order
-	a_, b_ := list[cur], list[adj]
-	if err := tx.Model(&model.Password{}).Where("id = ?", a_.ID).Update("sort_order", b_.SortOrder).Error; err != nil {
+	if err := tx.Model(&model.Password{}).Where("id = ?", src.ID).
+		Update("sort_order", dst.SortOrder).Error; err != nil {
 		tx.Rollback()
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
-	if err := tx.Model(&model.Password{}).Where("id = ?", b_.ID).Update("sort_order", a_.SortOrder).Error; err != nil {
+	if err := tx.Model(&model.Password{}).Where("id = ?", dst.ID).
+		Update("sort_order", src.SortOrder).Error; err != nil {
 		tx.Rollback()
 		c.JSON(500, gin.H{"error": err.Error()})
 		return

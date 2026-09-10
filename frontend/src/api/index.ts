@@ -109,6 +109,13 @@ export interface Password {
   updated_at: string
 }
 
+export interface PasswordListResponse {
+  items: Password[]
+  total: number
+  page: number
+  page_size: number
+}
+
 export const api = {
   async getConfig(): Promise<AppConfig> {
     return (await http.get<AppConfig>('/config')).data
@@ -156,8 +163,10 @@ export const api = {
   async retryTask(id: number | string): Promise<RetryTaskResponse> {
     return (await http.post<RetryTaskResponse>(`/tasks/${id}/retry`)).data
   },
-  async listPasswords(): Promise<{ items: Password[]; total: number }> {
-    return (await http.get('/passwords')).data
+  async listPasswords(
+    params: { page?: number; page_size?: number; sort_by?: string; desc?: boolean } = {}
+  ): Promise<PasswordListResponse> {
+    return (await http.get<PasswordListResponse>('/passwords', { params })).data
   },
   async createPassword(value: string, note?: string): Promise<Password> {
     return (await http.post<Password>('/passwords', { value, note })).data
@@ -171,8 +180,8 @@ export const api = {
   async deletePassword(id: number): Promise<void> {
     await http.delete(`/passwords/${id}`)
   },
-  async reorderPassword(id: number, direction: -1 | 1): Promise<void> {
-    await http.post('/passwords/reorder', { id, direction })
+  async reorderPassword(id: number, targetId: number): Promise<void> {
+    await http.post('/passwords/reorder', { id, target_id: targetId })
   }
 }
 
