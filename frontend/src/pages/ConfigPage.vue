@@ -94,8 +94,8 @@ async function onWake() {
       type: 'positive',
       message:
         resp.pending > 0
-          ? `已唤醒，${resp.pending} 个待处理任务开始排队`
-          : '已唤醒，当前没有待处理任务'
+          ? `已重启，${resp.pending} 个待处理任务开始排队`
+          : '已重启，当前没有待处理任务'
     })
   } catch (e) {
     $q.notify({ type: 'negative', message: (e as Error).message })
@@ -221,7 +221,7 @@ async function toggleEnabled(row: Password) {
     row.enabled = next
     $q.notify({
       type: 'positive',
-      message: next ? `序号 ${row.sort_order} 密码已生效` : `序号 ${row.sort_order} 密码已失效`
+      message: next ? `密码 ${row.value} 已生效` : `密码 ${row.value} 已失效`
     })
   } catch (e) {
     $q.notify({ type: 'negative', message: (e as Error).message })
@@ -360,20 +360,20 @@ onMounted(() => {
           @update:model-value="onConcurrencyChange"
         />
         <div class="text-caption text-grey-7 q-mt-xs">
-          可选 1-4，保存后立即生效（已在运行的任务不受影响，结束后按新上限补派）。
+          同时运行任务数,最多4
         </div>
 
         <q-separator class="q-my-md" />
 
         <div class="row items-center justify-between">
           <div class="q-pr-lg">
-            <div class="text-subtitle1 text-weight-medium">唤醒任务队列</div>
+            <div class="text-subtitle1 text-weight-medium">重启任务队列</div>
             <div class="text-caption text-grey-7 q-mt-xs">
-              正常情况下新建任务会自动触发调度。仅当任务长时间停留在「待处理」（例如服务异常中断后）时，点此按钮手动唤醒调度器，进行中的任务不受影响。
+              如果有任务不运行,点此按钮手动重启调度器，唤醒任务。
             </div>
           </div>
           <q-btn
-            label="唤醒任务队列"
+            label="重启任务队列"
             icon="play_arrow"
             color="primary"
             outline
@@ -391,7 +391,7 @@ onMounted(() => {
       <q-card-section>
         <div class="row items-center justify-between">
           <div class="q-pr-lg">
-            <div class="text-h6 text-weight-medium">批量操作与压缩设置</div>
+            <div class="text-h6 text-weight-medium">批量操作设置</div>
             <div class="text-caption text-grey-7 q-mt-xs">
               开启「穿透文件夹」后，文件页面的「解压全部 / 压缩全部」会递归处理当前目录下的所有子文件夹，而不仅限于当前目录本身。
             </div>
@@ -444,7 +444,7 @@ onMounted(() => {
           <q-btn color="primary" icon="add" label="添加" unelevated no-caps dense @click="openCreate" />
         </div>
         <div class="text-caption text-grey-7 q-mb-md">
-          按"序号"顺序轮询尝试，排在前的生效密码优先使用。拖动行（按住左侧拖动手柄）到目标位置释放即可调整顺序；点击列表行可快速切换密码生效/失效，失效密码不会参与解压尝试。留空表示无密码压缩包正常解压。
+          按"序号"顺序轮询尝试，排在前的生效密码优先使用。拖动行到目标位置释放即可调整顺序；点击列表行可快速切换密码生效/失效，失效密码不会参与解压尝试。留空表示无密码压缩包正常解压。
         </div>
         <q-table
           :rows="passwords"

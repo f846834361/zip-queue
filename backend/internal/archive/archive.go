@@ -50,6 +50,11 @@ func IsSupportedArchive(path string) bool {
 type Limits struct {
 	// MaxTotalBytes 单任务解压总字节上限（zip bomb 防护），0 表示不限制。
 	MaxTotalBytes int64
+	// MaxRatio 允许的最大压缩率（解压后大小 / 原压缩包大小），0 表示不限制。
+	// 用于拦截解压炸弹：很小的压缩包展开成超大文件时比率极高。
+	// 注意它只看比率、不限绝对大小，因此合法的大体积压缩包（如 300G 归档）
+	// 只要比率正常仍可通过。
+	MaxRatio int64
 }
 
 // Extract 解压 src 到 targetDir。智能合并：若压缩包仅含单一顶层目录，

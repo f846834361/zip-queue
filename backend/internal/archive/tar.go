@@ -64,6 +64,16 @@ func extractTar(ctx context.Context, src, targetDir string, limits Limits, p Pro
 	if limits.MaxTotalBytes > 0 && totalBytes > limits.MaxTotalBytes {
 		return fmt.Errorf("%w：压缩包解压后约 %d 字节，超过上限 %d", ErrLimitExceeded, totalBytes, limits.MaxTotalBytes)
 	}
+	// 压缩率限制：解压后估算大小 / 原压缩包大小 超过阈值即视为解压炸弹
+	if limits.MaxRatio > 0 {
+		if fi, serr := os.Stat(src); serr == nil && fi.Size() > 0 {
+			ratio := float64(totalBytes) / float64(fi.Size())
+			if ratio > float64(limits.MaxRatio) {
+				return fmt.Errorf("%w：压缩率 %.0f 超过上限 %d（解压后约 %d 字节 / 压缩包 %d 字节）",
+					ErrLimitExceeded, ratio, limits.MaxRatio, totalBytes, fi.Size())
+			}
+		}
+	}
 	t := newTracker(totalBytes, p)
 
 	f, err := os.Open(src)

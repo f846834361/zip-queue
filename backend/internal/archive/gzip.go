@@ -42,7 +42,20 @@ func extractGzipSingle(ctx context.Context, src, targetDir string, limits Limits
 
 	t := newTracker(0, p) // totalBytes=0 -> 不确定进度
 	cw := &countWriter{w: out, t: t}
-	if _, err := copyWithLimit(ctx, cw, gzr, limits.MaxTotalBytes); err != nil {
+	// 字节上限：绝对上限与按压缩率推导的上限取较小者；均未配置则为 -1（不限）。
+	// 注意不能把 0 当作“不限”传给 copyWithLimit（其 maxBytes>=0 即视为有限额 0）。
+	maxBytes := int64(-1)
+	if limits.MaxTotalBytes > 0 {
+		maxBytes = limits.MaxTotalBytes
+	}
+	if limits.MaxRatio > 0 {
+		if fi, serr := os.Stat(src); serr == nil && fi.Size() > 0 {
+			if ratioCap := int64(float64(fi.Size()) * float64(limits.MaxRatio)); maxBytes < 0 || ratioCap < maxBytes {
+				maxBytes = ratioCap
+			}
+		}
+	}
+	if _, err := copyWithLimit(ctx, cw, gzr, maxBytes); err != nil {
 		return err
 	}
 	if err := out.Close(); err != nil {
