@@ -44,10 +44,10 @@ jobs:
         with:
           images: ${{ env.IMAGE_NAME }}
           tags: |
-            type=ref,event=branch
+            # type=ref,event=branch 不推送main分支
             type=ref,event=pr
             type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
+            # type=semver,pattern={{major}}.{{minor}} 不推送浮动次版本
             # 不生成 sha-* 这类每提交必增的不可变标签：main/latest 均为可变标签，
             # 每次推送直接顶替旧指向，标签数恒定（≤2），无需删除权限也无需清理。
             type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
