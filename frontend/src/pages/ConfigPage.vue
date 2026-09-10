@@ -67,6 +67,28 @@ function onCompressionChange(val: AppConfig['compression_level'] | null) {
   void saveTaskSettings({ compression_level: val }, `压缩效率已设为「${compressionLabel(val)}」`)
 }
 
+// 手动唤醒调度器（用户兜底）：让调度器重新扫描待处理任务并补派空闲并发槽
+const waking = ref(false)
+
+async function onWake() {
+  if (waking.value) return
+  waking.value = true
+  try {
+    const resp = await api.wakeTasks()
+    $q.notify({
+      type: 'positive',
+      message:
+        resp.pending > 0
+          ? `已唤醒，${resp.pending} 个待处理任务开始排队`
+          : '已唤醒，当前没有待处理任务'
+    })
+  } catch (e) {
+    $q.notify({ type: 'negative', message: (e as Error).message })
+  } finally {
+    waking.value = false
+  }
+}
+
 async function loadConfig() {
   try {
     const cfg = await browseStore.ensureConfig()
@@ -280,6 +302,27 @@ onMounted(() => {
         />
         <div class="text-caption text-grey-7 q-mt-xs">
           可选 1-4，保存后立即生效（已在运行的任务不受影响，结束后按新上限补派）。
+        </div>
+
+        <q-separator class="q-my-md" />
+
+        <div class="row items-center justify-between">
+          <div class="q-pr-lg">
+            <div class="text-subtitle1 text-weight-medium">唤醒任务队列</div>
+            <div class="text-caption text-grey-7 q-mt-xs">
+              正常情况下新建任务会自动触发调度。仅当任务长时间停留在「待处理」（例如服务异常中断后）时，点此按钮手动唤醒调度器，进行中的任务不受影响。
+            </div>
+          </div>
+          <q-btn
+            label="唤醒任务队列"
+            icon="play_arrow"
+            color="primary"
+            outline
+            no-caps
+            dense
+            :loading="waking"
+            @click="onWake"
+          />
         </div>
       </q-card-section>
     </q-card>

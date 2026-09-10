@@ -22,8 +22,6 @@ const POLL_INTERVAL_MS = 5000
 let pollTimer: ReturnType<typeof setInterval> | null = null
 // 当前目录 mtime 基线；与轮询返回的 modified 不一致即刷新
 const currentModified = ref(0)
-// 当前路径下进行中的任务数，仅用于 UI 提示
-const activeCount = ref(0)
 
 // 地址栏编辑态：true 时显示可输入路径输入框，false 时显示面包屑导航。
 const editing = ref(false)
@@ -76,7 +74,6 @@ async function load(path?: string) {
     entries.value = resp.entries
     browseStore.setPath(resp.path)
     currentModified.value = resp.modified || 0
-    activeCount.value = 0
     startPolling()
   } catch (e) {
     $q.notify({ type: 'negative',  message: (e as Error).message })
@@ -96,7 +93,6 @@ async function pollOnce() {
   if (!currentPath.value) return
   try {
     const resp = await api.getFileStatus(currentPath.value)
-    activeCount.value = resp.active_count
     if (resp.modified > 0 && resp.modified !== currentModified.value) {
       currentModified.value = resp.modified
       await load(currentPath.value)
@@ -146,7 +142,7 @@ function submitManualPath() {
 }
 
 const selectedEntries = computed(() =>
-  entries.value.filter((e) => selected.value.has(e.path))
+    entries.value.filter((e) => selected.value.has(e.path))
 )
 const selectedCount = computed(() => selected.value.size)
 
@@ -167,10 +163,10 @@ const breadcrumbSegments = computed(() => {
 })
 
 const canDecompress = computed(() =>
-  selectedEntries.value.some((e) => e.is_archive)
+    selectedEntries.value.some((e) => e.is_archive)
 )
 const canCompress = computed(() =>
-  selectedEntries.value.some((e) => !e.is_archive)
+    selectedEntries.value.some((e) => !e.is_archive)
 )
 
 // 通用二次确认弹窗，返回用户是否确认
@@ -182,16 +178,16 @@ function confirmAction(title: string, message: string): Promise<boolean> {
       ok: { label: '确认', color: 'primary', unelevated: true },
       cancel: { label: '取消', flat: true }
     })
-      .onOk(() => resolve(true))
-      .onCancel(() => resolve(false))
-      .onDismiss(() => resolve(false))
+        .onOk(() => resolve(true))
+        .onCancel(() => resolve(false))
+        .onDismiss(() => resolve(false))
   })
 }
 
 // 当前目录可被批量解压/压缩的数量（供未勾选时提示）
 const bulkArchiveCount = computed(() => entries.value.filter((e) => e.is_archive).length)
 const bulkCompressibleCount = computed(
-  () => entries.value.filter((e) => !e.is_archive && (e.is_dir || e.size > 0)).length
+    () => entries.value.filter((e) => !e.is_archive && (e.is_dir || e.size > 0)).length
 )
 
 async function handleDecompress() {
@@ -202,8 +198,8 @@ async function handleDecompress() {
       const archives = selectedEntries.value.filter((e) => e.is_archive)
       if (archives.length === 0) return
       const go = await confirmAction(
-        '确认解压',
-        `将为选中的 ${archives.length} 个压缩包创建解压任务，任务完成后会删除对应的原压缩包。是否继续？`
+          '确认解压',
+          `将为选中的 ${archives.length} 个压缩包创建解压任务，任务完成后会删除对应的原压缩包。是否继续？`
       )
       if (go) await addToQueue('decompress')
       return
@@ -213,11 +209,11 @@ async function handleDecompress() {
       return
     }
     const scopeText = penetrateSubfolders.value
-      ? '开启穿透：将连同当前目录所有子文件夹中的压缩包一起创建解压任务'
-      : '仅处理当前目录中的压缩包（不进入子目录）'
+        ? '开启穿透：将连同当前目录所有子文件夹中的压缩包一起创建解压任务'
+        : '仅处理当前目录中的压缩包（不进入子目录）'
     const go = await confirmAction(
-      '确认批量解压',
-      `当前目录下共有 ${bulkArchiveCount.value} 个压缩包。${scopeText}，任务完成后会删除对应的原压缩包。是否继续？`
+        '确认批量解压',
+        `当前目录下共有 ${bulkArchiveCount.value} 个压缩包。${scopeText}，任务完成后会删除对应的原压缩包。是否继续？`
     )
     if (go) await bulkDecompress()
   } finally {
@@ -233,8 +229,8 @@ async function handleCompress() {
       const items = selectedEntries.value.filter((e) => !e.is_archive)
       if (items.length === 0) return
       const go = await confirmAction(
-        '确认压缩',
-        `将为选中的 ${items.length} 项创建压缩任务并生成同名 .zip（每个选中的文件夹整体压缩为一个包，不展开其子文件夹），任务完成后会删除原文件/文件夹。是否继续？`
+          '确认压缩',
+          `将为选中的 ${items.length} 项创建压缩任务并生成同名 .zip（每个选中的文件夹整体压缩为一个包，不展开其子文件夹），任务完成后会删除原文件/文件夹。是否继续？`
       )
       if (go) await addToQueue('compress')
       return
@@ -244,13 +240,13 @@ async function handleCompress() {
       return
     }
     const go = penetrateSubfolders.value
-      ? await confirmAction(
-          '确认批量压缩',
-          '开启穿透：将穿透当前目录所有子文件夹，把其中每个文件（非压缩包）单独创建压缩任务（文件夹本身不压缩），任务完成后会删除原文件。是否继续？'
+        ? await confirmAction(
+            '确认批量压缩',
+            '开启穿透：将穿透当前目录所有子文件夹，把其中每个文件（非压缩包）单独创建压缩任务（文件夹本身不压缩），任务完成后会删除原文件。是否继续？'
         )
-      : await confirmAction(
-          '确认批量压缩',
-          `将把当前目录下除压缩包外的 ${bulkCompressibleCount.value} 项内容全部压缩为同名 .zip（不进入子目录），任务完成后会删除原文件/文件夹。是否继续？`
+        : await confirmAction(
+            '确认批量压缩',
+            `将把当前目录下除压缩包外的 ${bulkCompressibleCount.value} 项内容全部压缩为同名 .zip（不进入子目录），任务完成后会删除原文件/文件夹。是否继续？`
         )
     if (go) await bulkCompress()
   } finally {
@@ -261,9 +257,9 @@ async function handleCompress() {
 // addToQueue 把勾选项一次性批量建任务（每个勾选项独立一条任务），不再逐个循环请求。
 async function addToQueue(type: 'decompress' | 'compress') {
   const candidates =
-    type === 'decompress'
-      ? selectedEntries.value.filter((e) => e.is_archive)
-      : selectedEntries.value.filter((e) => !e.is_archive)
+      type === 'decompress'
+          ? selectedEntries.value.filter((e) => e.is_archive)
+          : selectedEntries.value.filter((e) => !e.is_archive)
 
   if (candidates.length === 0) {
     $q.notify({
@@ -275,8 +271,8 @@ async function addToQueue(type: 'decompress' | 'compress') {
 
   try {
     const resp = await api.createTasksBatch(
-      type,
-      candidates.map((e) => e.path)
+        type,
+        candidates.map((e) => e.path)
     )
     const ignored = resp.skipped > 0 ? `，忽略 ${resp.skipped} 个不符合条件的项` : ''
     $q.notify({
@@ -347,35 +343,25 @@ function onUpdateSelected(val: readonly FsEntry[]) {
           <div class="col address-bar row items-center" tabindex="0" @click="startEdit">
             <q-breadcrumbs v-show="!editing" gutter="xs" class="text-body2 col">
               <q-breadcrumbs-el
-                v-for="(seg, idx) in breadcrumbSegments"
-                :key="idx"
-                :label="seg.label"
-                icon="folder"
-                @click.stop="load(seg.path)"
+                  v-for="(seg, idx) in breadcrumbSegments"
+                  :key="idx"
+                  :label="seg.label"
+                  icon="folder"
+                  @click.stop="load(seg.path)"
               />
             </q-breadcrumbs>
             <q-input
-              v-show="editing"
-              ref="pathInputRef"
-              v-model="manualPath"
-              outlined
-              dense
-              class="col"
-              @keyup.enter="submitManualPath"
-              @keyup.esc="cancelEdit"
-              @blur="commitEdit"
+                v-show="editing"
+                ref="pathInputRef"
+                v-model="manualPath"
+                outlined
+                dense
+                class="col"
+                @keyup.enter="submitManualPath"
+                @keyup.esc="cancelEdit"
+                @blur="commitEdit"
             />
           </div>
-          <q-chip
-            v-if="activeCount > 0"
-            dense
-            color="blue-3"
-            text-color="black"
-            icon="sync"
-            class="q-ml-sm"
-          >
-            {{ activeCount }} 个后台任务进行中
-          </q-chip>
           <q-btn color="secondary" icon="arrow_upward" label="上级" outline @click="goUp" />
           <q-btn color="grey-7" icon="refresh" label="刷新" flat @click="load(currentPath)" />
         </div>
@@ -387,26 +373,26 @@ function onUpdateSelected(val: readonly FsEntry[]) {
         <div class="row items-center justify-between q-mb-sm">
           <div class="row items-center q-gutter-sm">
             <q-btn
-              color="primary"
-              icon="unarchive"
-              :label="selectedCount ? '解压' : '解压全部'"
-              unelevated
-              no-caps
-              dense
-              :disable="submitting || (selectedCount > 0 && !canDecompress)"
-              :loading="submitting"
-              @click="handleDecompress"
+                color="primary"
+                icon="unarchive"
+                :label="selectedCount ? '解压' : '解压全部'"
+                unelevated
+                no-caps
+                dense
+                :disable="submitting || (selectedCount > 0 && !canDecompress)"
+                :loading="submitting"
+                @click="handleDecompress"
             />
             <q-btn
-              color="secondary"
-              icon="archive"
-              :label="selectedCount ? '压缩' : '压缩全部'"
-              unelevated
-              no-caps
-              dense
-              :disable="submitting || (selectedCount > 0 && !canCompress)"
-              :loading="submitting"
-              @click="handleCompress"
+                color="secondary"
+                icon="archive"
+                :label="selectedCount ? '压缩' : '压缩全部'"
+                unelevated
+                no-caps
+                dense
+                :disable="submitting || (selectedCount > 0 && !canCompress)"
+                :loading="submitting"
+                @click="handleCompress"
             />
           </div>
           <div v-if="selectedCount" class="text-caption text-grey-7">
@@ -417,28 +403,28 @@ function onUpdateSelected(val: readonly FsEntry[]) {
 
       <q-card-section>
         <q-table
-          :rows="entries"
-          :columns="columns"
-          :loading="loading"
-          row-key="path"
-          :pagination="{ rowsPerPage: 0 }"
-          selection="multiple"
-          :selected="selectedEntries"
-          @update:selected="onUpdateSelected"
-          @row-click="onRowClick"
-          virtual-scroll
-          :virtual-scroll-slice-size="50"
-          style="max-height: 65vh"
-          hide-pagination
-          flat
+            :rows="entries"
+            :columns="columns"
+            :loading="loading"
+            row-key="path"
+            :pagination="{ rowsPerPage: 0 }"
+            selection="multiple"
+            :selected="selectedEntries"
+            @update:selected="onUpdateSelected"
+            @row-click="onRowClick"
+            virtual-scroll
+            :virtual-scroll-slice-size="50"
+            style="max-height: 65vh"
+            hide-pagination
+            flat
         >
           <template #body-cell-name="props">
             <q-td :props="props">
               <q-icon
-                :name="props.row.is_dir ? (props.row.is_archive ? 'folder_zip' : 'folder') : (props.row.is_archive ? 'folder_zip' : 'description')"
-                :color="props.row.is_dir ? 'amber-8' : (props.row.is_archive ? 'deep-orange' : 'grey-7')"
-                size="sm"
-                class="q-mr-xs"
+                  :name="props.row.is_dir ? (props.row.is_archive ? 'folder_zip' : 'folder') : (props.row.is_archive ? 'folder_zip' : 'description')"
+                  :color="props.row.is_dir ? 'amber-8' : (props.row.is_archive ? 'deep-orange' : 'grey-7')"
+                  size="sm"
+                  class="q-mr-xs"
               />
               <span :class="{ 'text-primary cursor-pointer': props.row.is_dir, 'text-weight-medium': props.row.is_archive }">
                 {{ props.row.name }}
@@ -453,15 +439,15 @@ function onUpdateSelected(val: readonly FsEntry[]) {
           <template #body-cell-type="props">
             <q-td :props="props">
               <q-badge
-                v-if="props.row.is_archive"
-                color="deep-orange"
-                label="压缩包"
+                  v-if="props.row.is_archive"
+                  color="deep-orange"
+                  label="压缩包"
               />
               <q-badge
-                v-else-if="props.row.is_dir"
-                color="amber-8"
-                text-color="black"
-                label="文件夹"
+                  v-else-if="props.row.is_dir"
+                  color="amber-8"
+                  text-color="black"
+                  label="文件夹"
               />
               <q-badge v-else color="grey-6" label="文件" />
             </q-td>

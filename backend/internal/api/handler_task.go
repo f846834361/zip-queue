@@ -461,6 +461,17 @@ func (a *API) RetryTask(c *gin.Context) {
 	c.JSON(201, gin.H{"id": nt.ID, "requeue_count": nt.RequeueCount})
 }
 
+// WakeTasks 手动唤醒调度器：立即重新扫描 pending 任务并补满空闲并发槽。
+// 正常路径（建任务 / 任务结束 / 调整并发 / 重试）都会自动唤醒，
+// 此接口用于异常情况下由用户在配置页兜底唤醒。
+func (a *API) WakeTasks(c *gin.Context) {
+	var pending, running int64
+	a.db.Model(&model.Task{}).Where("status = ?", model.StatusPending).Count(&pending)
+	a.db.Model(&model.Task{}).Where("status = ?", model.StatusRunning).Count(&running)
+	a.pool.Enqueue()
+	c.JSON(200, gin.H{"ok": true, "pending": pending, "running": running})
+}
+
 // DeleteTask 删除任务记录（仅允许已结束任务）。
 func (a *API) DeleteTask(c *gin.Context) {
 	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
@@ -516,15 +527,9 @@ func isDateOnly(s string) bool {
 	return err == nil
 }
 
-// FileStatus 返回指定路径的目录最后修改时间，以及是否有作用于该路径（含其子路径）的
-// 进行中（pending/running）任务。前端以固定周期轮询此接口，用 modified 与本地基线
-// 对比，判断是否需要刷新文件列表。
-//
-// 设计取舍：
-//   - modified：目录 ModTime 的 unix 秒。目录内容变化（增删/重命名直接子项）即更新，
-//     正是"列表需要刷新"的充要条件，一次 stat 即可，成本极低。
-//   - active / active_count：仅用于 UI 展示"后台任务进行中"提示，不驱动刷新，
-//     避免任务刚启动（源文件还在）时产生无意义刷新。
+// FileStatus 返回指定路径的目录最后修改时间（unix 秒）。
+// 前端以固定周期轮询此接口，用 modified 与本地基线对比，决定是否需要刷新文件列表。
+// 目录内容变化（增删/重命名直接子项）即更新 mtime，正是"列表需要刷新"的充要条件。
 func (a *API) FileStatus(c *gin.Context) {
 	path := c.Query("path")
 	if path == "" {
@@ -535,20 +540,5 @@ func (a *API) FileStatus(c *gin.Context) {
 	if info, err := os.Stat(path); err == nil {
 		modified = info.ModTime().Unix()
 	}
-	var tasks []model.Task
-	likeSlash := path + "/%"
-	likeBack := path + "\\%"
-	if err := a.db.Model(&model.Task{}).
-		Where("status IN ?", []string{model.StatusPending, model.StatusRunning}).
-		Where("(source_path = ? OR source_path LIKE ? OR source_path LIKE ?)",
-			path, likeSlash, likeBack).
-		Find(&tasks).Error; err != nil {
-		c.JSON(500, gin.H{"error": err.Error()})
-		return
-	}
-	c.JSON(200, gin.H{
-		"modified":     modified,
-		"active":       len(tasks) > 0,
-		"active_count": len(tasks),
-	})
+	c.JSON(200, gin.H{"modified": modified})
 }
