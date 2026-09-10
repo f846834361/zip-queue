@@ -32,6 +32,8 @@ type WorkerConfig struct {
 	MaxConcurrentTasks int `yaml:"max_concurrent_tasks"`
 	// MaxExtractTotalBytes 单任务解压总字节上限（zip bomb 防护），0 表示不限制。
 	MaxExtractTotalBytes int64 `yaml:"max_extract_total_bytes"`
+	// MaxExtractRatio 允许的最大压缩率（解压后大小 / 原压缩包大小），0 表示不限制。
+	MaxExtractRatio int64 `yaml:"max_extract_ratio"`
 }
 
 type BrowseConfig struct {
@@ -79,6 +81,9 @@ func (c *Config) applyDefaults() {
 	if c.Browse.DefaultPath == "" {
 		c.Browse.DefaultPath = "/"
 	}
+	if c.Worker.MaxExtractRatio == 0 {
+		c.Worker.MaxExtractRatio = 100
+	}
 	if c.Log.Level == "" {
 		c.Log.Level = "info"
 	}
@@ -124,6 +129,13 @@ func (c *Config) applyEnvOverrides() error {
 			return fmt.Errorf("invalid WORKER_MAX_EXTRACT_TOTAL_BYTES %q: %w", v, err)
 		}
 		c.Worker.MaxExtractTotalBytes = n
+	}
+	if v := os.Getenv("WORKER_MAX_EXTRACT_RATIO"); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return fmt.Errorf("invalid WORKER_MAX_EXTRACT_RATIO %q: %w", v, err)
+		}
+		c.Worker.MaxExtractRatio = n
 	}
 	if v := os.Getenv("BROWSE_DEFAULT_PATH"); v != "" {
 		c.Browse.DefaultPath = v

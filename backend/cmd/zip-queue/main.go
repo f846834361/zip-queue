@@ -55,7 +55,10 @@ func main() {
 		log.Printf("recovered %d interrupted tasks (requeued %d, temp cleaned)", recovered, requeued)
 	}
 
-	runner := worker.NewRunner(gdb, archive.Limits{MaxTotalBytes: cfg.Worker.MaxExtractTotalBytes})
+	runner := worker.NewRunner(gdb, archive.Limits{
+		MaxTotalBytes: cfg.Worker.MaxExtractTotalBytes,
+		MaxRatio:      cfg.Worker.MaxExtractRatio,
+	})
 	pool := worker.NewPool(gdb, runner, concurrency)
 
 	ctx, cancel := context.WithCancel(context.Background())
