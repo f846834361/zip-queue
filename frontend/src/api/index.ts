@@ -32,10 +32,6 @@ export interface ListDirResponse {
 export interface FileStatusResponse {
   /** 目录最后修改时间（unix 秒）；为 0 表示路径不存在/无效 */
   modified: number
-  /** 当前路径（含子路径）是否有进行中的任务 */
-  active: boolean
-  /** 进行中任务数量 */
-  active_count: number
 }
 
 export interface Task {
