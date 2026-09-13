@@ -172,6 +172,8 @@ const selectedCount = computed(() => selected.value.size)
 const breadcrumbSegments = computed(() => {
   const p = currentPath.value
   if (!p) return [] as { label: string; path: string }[]
+  // Unix 根目录 "/" 没有可拆分的子段，单独回显为"根目录"，避免地址栏空白误以为无内容
+  if (p === '/') return [{ label: '根目录', path: '/' }]
   const sep = p.includes('/') ? '/' : '\\'
   const segs: { label: string; path: string }[] = []
   for (const part of p.split(/[\\/]/).filter(Boolean)) {

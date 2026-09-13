@@ -65,8 +65,8 @@ async function refreshTaskStatus() {
         <q-chip
           dense
           square
-          :color="taskActive ? 'green' : 'grey-7'"
-          text-color="white"
+          :color="taskActive ? 'green' : 'white'"
+          :text-color="taskActive ? 'white' : 'primary'"
           class="q-mr-none"
         >
           <q-icon :name="taskActive ? 'sync' : 'check_circle'" size="xs" class="q-mr-xs" />
