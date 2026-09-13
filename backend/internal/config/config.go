@@ -38,6 +38,10 @@ type WorkerConfig struct {
 
 type BrowseConfig struct {
 	DefaultPath string `yaml:"default_path"`
+	// CacheTTL 目录列表结果的短时缓存时长。对含大量文件的目录，ReadDir + 逐文件
+	// lstat 可能很慢（尤其网络文件系统挂载），缓存可避免重复遍历导致的请求超时。
+	// 缓存同时由目录 mtime 变化触发失效，文件增删改都会自动刷新。0 表示不缓存。
+	CacheTTL time.Duration `yaml:"cache_ttl"`
 }
 
 type LogConfig struct {
@@ -80,6 +84,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Browse.DefaultPath == "" {
 		c.Browse.DefaultPath = "/"
+	}
+	if c.Browse.CacheTTL == 0 {
+		c.Browse.CacheTTL = 15 * time.Second
 	}
 	if c.Worker.MaxExtractRatio == 0 {
 		c.Worker.MaxExtractRatio = 100
@@ -139,6 +146,11 @@ func (c *Config) applyEnvOverrides() error {
 	}
 	if v := os.Getenv("BROWSE_DEFAULT_PATH"); v != "" {
 		c.Browse.DefaultPath = v
+	}
+	if v := os.Getenv("BROWSE_CACHE_TTL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			c.Browse.CacheTTL = d
+		}
 	}
 	if v := os.Getenv("LOG_LEVEL"); v != "" {
 		c.Log.Level = v
