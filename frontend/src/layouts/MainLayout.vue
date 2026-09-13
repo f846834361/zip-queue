@@ -51,50 +51,51 @@ async function refreshTaskStatus() {
   }
 }
 
-// 顶栏源路径搜索：QSelect + use-input + filter 实现自动补全，
-// 选中候选或回车/搜索图标跳转任务页按源路径筛选。
+// 顶栏源路径搜索：输入时模糊查询候选（自动补全），点击候选或回车/搜索图标跳转任务页筛选。
 const searchText = ref('')
-const searchSelection = ref<string | null>(null)
-const searchOptions = ref<string[]>([])
+const suggestions = ref<string[]>([])
 const searchLoading = ref(false)
+const showSuggest = ref(false)
+let suggestTimer: ReturnType<typeof setTimeout> | undefined
 
-// use-input 输入时触发：防抖由 QSelect 的 input-debounce 负责，这里拉取候选并写入 options
-function onFilter(val: string, update: (cb: () => void) => void, abort: () => void) {
-  const q = val.trim()
+function onSearchInput(val: string | number | null) {
+  showSuggest.value = true
+  if (suggestTimer) clearTimeout(suggestTimer)
+  const q = (val ?? '').toString().trim()
   if (!q) {
-    update(() => {
-      searchOptions.value = []
-    })
+    suggestions.value = []
     return
   }
+  // 输入防抖 250ms，避免每次按键都请求候选接口
+  suggestTimer = setTimeout(() => void loadSuggest(q), 250)
+}
+
+async function loadSuggest(q: string) {
   searchLoading.value = true
-  api.suggestSourcePaths(q, 10)
-    .then((r) => {
-      update(() => {
-        searchOptions.value = r.items
-      })
-    })
-    .catch(() => abort())
-    .finally(() => {
-      searchLoading.value = false
-    })
+  try {
+    const r = await api.suggestSourcePaths(q, 10)
+    suggestions.value = r.items
+  } catch {
+    suggestions.value = []
+  } finally {
+    searchLoading.value = false
+  }
 }
 
-// 同步输入框文本，供回车/搜索图标使用当前输入值
-function onInputValue(val: string | number | null) {
-  searchText.value = (val ?? '').toString()
-}
-
-// 执行搜索：跳转任务页，按源路径模糊筛选展示结果
+// 执行搜索：跳转任务页，按其源路径模糊筛选展示结果（不展示具体任务明细，只过滤列表）
 function doSearch(value: string) {
   const v = value.trim()
   if (!v) return
+  showSuggest.value = false
+  suggestions.value = []
   void router.push({ path: '/tasks', query: { source: v } })
 }
 
-// 从下拉候选中选择某项时触发
-function onSelect(val: string | null) {
-  if (val) doSearch(val)
+function closeSuggest() {
+  // 延迟关闭，留出点击候选的时间差，避免面板先消失导致点击不到
+  setTimeout(() => {
+    showSuggest.value = false
+  }, 150)
 }
 </script>
 
@@ -114,11 +115,9 @@ function onSelect(val: string | null) {
         <q-space />
 
         <div class="search-wrap q-mx-md">
-          <q-select
-            v-model="searchSelection"
-            :options="searchOptions"
-            use-input
-            input-debounce="250"
+          <q-input
+            v-model="searchText"
+            type="search"
             dense
             outlined
             rounded
@@ -126,20 +125,33 @@ function onSelect(val: string | null) {
             placeholder="搜索源路径"
             class="search-box"
             :loading="searchLoading"
-            @filter="onFilter"
-            @input-value="onInputValue"
-            @update:model-value="onSelect"
+            @update:model-value="onSearchInput"
             @keyup.enter="doSearch(searchText)"
+            @blur="closeSuggest"
           >
-            <template #no-option>
-              <q-item>
-                <q-item-section class="text-grey">无匹配源路径</q-item-section>
-              </q-item>
-            </template>
             <template #append>
               <q-icon name="search" class="cursor-pointer search-icon" @click="doSearch(searchText)" />
             </template>
-          </q-select>
+          </q-input>
+          <q-list
+            v-if="showSuggest && suggestions.length"
+            bordered
+            separator
+            class="suggest-panel"
+          >
+            <q-item
+              v-for="s in suggestions"
+              :key="s"
+              clickable
+              v-ripple
+              @click="doSearch(s)"
+              @mousedown.prevent
+            >
+              <q-item-section>
+                <span class="mono text-caption text-break-all">{{ s }}</span>
+              </q-item-section>
+            </q-item>
+          </q-list>
         </div>
 
         <q-space />
@@ -210,5 +222,17 @@ function onSelect(val: string | null) {
 }
 .search-icon {
   color: #757575;
+}
+.suggest-panel {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 5000;
+  max-height: 320px;
+  overflow: auto;
+  background: #fff;
+  color: #1d1d1d;
+  border-radius: 4px;
 }
 </style>
