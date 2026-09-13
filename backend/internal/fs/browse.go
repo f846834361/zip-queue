@@ -41,30 +41,44 @@ func List(path string) ([]Entry, time.Time, error) {
 		if strings.HasPrefix(name, ".zq-tmp-") {
 			continue
 		}
-		fi, err := de.Info()
-		var size int64
-		var mt time.Time
-		if err == nil {
-			size = fi.Size()
-			mt = fi.ModTime()
-		}
 		full := filepath.Join(path, name)
-		out = append(out, Entry{
-			Name:      name,
-			Path:      full,
-			IsDir:     de.IsDir(),
-			IsArchive: !de.IsDir() && archive.IsSupportedArchive(name),
-			Size:      size,
-			ModTime:   mt,
-		})
+		e, err := buildEntry(full)
+		if err != nil {
+			continue
+		}
+		out = append(out, e)
 	}
+	sortEntries(out)
+	return out, info.ModTime(), nil
+}
+
+// buildEntry 由完整路径构造一个目录项（单次 Lstat，廉价，且不跟随符号链接，
+// 与 os.ReadDir 得到的 DirEntry.Info() 语义一致）。既用于 List 全量遍历，
+// 也用于任务完成后对缓存条目的局部增量更新（此时只有单条路径，没有 DirEntry）。
+func buildEntry(full string) (Entry, error) {
+	fi, err := os.Lstat(full)
+	if err != nil {
+		return Entry{}, err
+	}
+	name := filepath.Base(full)
+	return Entry{
+		Name:      name,
+		Path:      full,
+		IsDir:     fi.IsDir(),
+		IsArchive: !fi.IsDir() && archive.IsSupportedArchive(name),
+		Size:      fi.Size(),
+		ModTime:   fi.ModTime(),
+	}, nil
+}
+
+// sortEntries 按「目录在前、名称不区分大小写」对目录项原地排序，保证输出确定性顺序。
+func sortEntries(out []Entry) {
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].IsDir != out[j].IsDir {
 			return out[i].IsDir
 		}
 		return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name)
 	})
-	return out, info.ModTime(), nil
 }
 
 // NotDirError 在给定路径不是目录时返回。

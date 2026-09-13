@@ -13,6 +13,7 @@ import (
 	"gorm.io/gorm"
 
 	"zip-queue/internal/archive"
+	"zip-queue/internal/fs"
 	"zip-queue/internal/model"
 	"zip-queue/internal/setting"
 )
@@ -219,6 +220,11 @@ func (r *Runner) fail(task *model.Task, msg string) {
 }
 
 func (r *Runner) succeed(task *model.Task) {
+	// 任务成功后对源目录的列表缓存做精确增量更新（删 SourcePath、加 TargetPath），
+	// 而非整条失效：解压删源压缩包加解压目录、压缩删源加 .zip，delta 完全一致。
+	// 这样对含大量文件的目录在频繁任务下不会反复触发昂贵的全量重列，缓存始终温热；
+	// 外部/手动改动仍由 ListCached 的 mtime 守卫兜底失效。
+	fs.UpdateListCache(filepath.Dir(task.SourcePath), task.SourcePath, task.TargetPath)
 	r.updateTask(task.ID, map[string]interface{}{
 		"status":           model.StatusSucceeded,
 		"progress_percent": 100,

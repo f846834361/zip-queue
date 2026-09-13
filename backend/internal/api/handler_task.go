@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -363,6 +364,73 @@ func (a *API) ActiveTasks(c *gin.Context) {
 	})
 }
 
+// 源路径搜索候选的短缓存：相同关键字在 TTL 内直接返回，降低高频输入时的查询压力。
+var (
+	suggestCacheMu  sync.Mutex
+	suggestCache    = map[string]suggestCacheEntry{}
+	suggestCacheTTL = 3 * time.Second
+)
+
+type suggestCacheEntry struct {
+	paths  []string
+	expire time.Time
+}
+
+// SuggestSourcePaths 模糊匹配 source_path，返回去重候选（最多 limit 条），
+// 供顶栏搜索框自动补全。limit 由前端传入，默认 10、上限 50。
+func (a *API) SuggestSourcePaths(c *gin.Context) {
+	q := c.Query("q")
+	if q == "" {
+		c.JSON(200, gin.H{"items": []string{}})
+		return
+	}
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "10"))
+	if limit < 1 || limit > 50 {
+		limit = 10
+	}
+	// 短缓存命中则直接返回，避免每次按键都查库
+	suggestCacheMu.Lock()
+	if e, ok := suggestCache[q]; ok && time.Now().Before(e.expire) {
+		paths := e.paths
+		suggestCacheMu.Unlock()
+		c.JSON(200, gin.H{"items": paths})
+		return
+	}
+	suggestCacheMu.Unlock()
+
+	var paths []string
+	a.db.Model(&model.Task{}).
+		Distinct("source_path").
+		Where("source_path LIKE ?", "%"+q+"%").
+		Order("source_path").
+		Limit(limit).
+		Pluck("source_path", &paths)
+	if paths == nil {
+		paths = []string{}
+	}
+	// 写入缓存（带过期时间）
+	suggestCacheMu.Lock()
+	suggestCache[q] = suggestCacheEntry{paths: paths, expire: time.Now().Add(suggestCacheTTL)}
+	suggestCacheMu.Unlock()
+
+	c.JSON(200, gin.H{"items": paths})
+}
+
+// invalidateSuggestCache 删除缓存中所有包含指定源路径的候选条目。
+// 删除任务后调用，使候选列表及时反映最新的源路径集合。
+func invalidateSuggestCache(path string) {
+	suggestCacheMu.Lock()
+	defer suggestCacheMu.Unlock()
+	for k, e := range suggestCache {
+		for _, v := range e.paths {
+			if v == path {
+				delete(suggestCache, k)
+				break
+			}
+		}
+	}
+}
+
 // ListTasks 分页 + 筛选任务列表。
 func (a *API) ListTasks(c *gin.Context) {
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
@@ -382,6 +450,9 @@ func (a *API) ListTasks(c *gin.Context) {
 	}
 	if v := c.Query("source_path"); v != "" {
 		q = q.Where("source_path LIKE ?", "%"+v+"%")
+	}
+	if v := c.Query("target_path"); v != "" {
+		q = q.Where("target_path LIKE ?", "%"+v+"%")
 	}
 	if v := c.Query("completed_after"); v != "" {
 		if t, err := parseTime(v); err == nil {
@@ -499,6 +570,9 @@ func (a *API) DeleteTask(c *gin.Context) {
 		return
 	}
 	a.db.Delete(&task)
+	// 任务删除后，其源路径可能不再出现在候选中：移除缓存中涉及该路径的项，
+	// 下次搜索命中 miss 会重新查库并恢复（若仍被其他任务引用则照常返回）。
+	invalidateSuggestCache(task.SourcePath)
 	c.JSON(200, gin.H{"ok": true})
 }
 
