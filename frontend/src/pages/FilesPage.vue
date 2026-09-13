@@ -13,6 +13,11 @@ const currentPath = ref('')
 const manualPath = ref('')
 const entries = ref<FsEntry[]>([])
 const loading = ref(false)
+// 用户点击文件夹后、后端尚未返回前，记录"正在进入"的目录路径，
+// 用于立即高亮该行，给用户"已点中"的反馈，避免误以为没点中而重复点击。
+const pendingPath = ref('')
+// 请求令牌：并发/竞态时仅最新一次请求的结果生效，过期响应直接丢弃
+let loadToken = 0
 // 用 Set 保存选中路径：勾选态查找 O(1)，避免大目录下 O(n·m) 的 includes 扫描
 const selected = ref<Set<string>>(new Set())
 const submitting = ref(false)
@@ -65,10 +70,15 @@ const columns = [
 ]
 
 async function load(path?: string) {
+  // 加载中忽略新的导航请求，避免用户重复点击触发并发/竞态
+  if (loading.value) return
   loading.value = true
   selected.value = new Set()
+  const token = ++loadToken
   try {
     const resp = await api.listDir(path)
+    // 若期间又发起了更新的请求，本次结果作废
+    if (token !== loadToken) return
     currentPath.value = resp.path
     manualPath.value = resp.path
     entries.value = resp.entries
@@ -76,9 +86,13 @@ async function load(path?: string) {
     currentModified.value = resp.modified || 0
     startPolling()
   } catch (e) {
+    if (token !== loadToken) return
     $q.notify({ type: 'negative',  message: (e as Error).message })
   } finally {
-    loading.value = false
+    if (token === loadToken) {
+      loading.value = false
+      pendingPath.value = ''
+    }
   }
 }
 
@@ -128,7 +142,15 @@ function goUp() {
 
 function openDir(row: FsEntry) {
   if (!row.is_dir) return
+  if (loading.value) return
+  // 点击瞬间立即高亮目标行，给出"已点中"的即时反馈（即便后端还没返回）
+  pendingPath.value = row.path
   void load(row.path)
+}
+
+// 高亮"正在进入"的文件夹行
+function rowClassFn(row: FsEntry): string {
+  return row.path === pendingPath.value ? 'pending-row' : ''
 }
 
 function submitManualPath() {
@@ -400,10 +422,15 @@ function onUpdateSelected(val: readonly FsEntry[]) {
       </q-card-section>
 
       <q-card-section>
+        <div v-if="loading" class="row items-center q-gutter-xs text-primary q-mb-sm">
+          <q-spinner-dots size="20px" color="primary" />
+          <span>正在加载目录，请稍候…</span>
+        </div>
         <q-table
             :rows="entries"
             :columns="columns"
             :loading="loading"
+            :row-class-fn="rowClassFn"
             row-key="path"
             :pagination="{ rowsPerPage: 0 }"
             selection="multiple"
@@ -472,5 +499,9 @@ function onUpdateSelected(val: readonly FsEntry[]) {
 }
 .address-bar:hover {
   background: rgba(0, 0, 0, 0.04);
+}
+/* 点击文件夹后、后端返回前高亮目标行，提示"已点中" */
+:deep(tr.pending-row) > td {
+  background-color: rgba(25, 118, 210, 0.14);
 }
 </style>
