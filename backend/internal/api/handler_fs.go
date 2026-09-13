@@ -16,7 +16,10 @@ func (a *API) ListDir(c *gin.Context) {
 	if path == "" {
 		path = a.cfg.Browse.DefaultPath
 	}
-	entries, modTime, err := fs.List(path)
+	if c.Query("refresh") == "1" {
+		fs.InvalidateListCache(path)
+	}
+	entries, modTime, err := fs.ListCached(path, a.cfg.Browse.CacheTTL)
 	if err != nil {
 		var nde *fs.NotDirError
 		if errors.As(err, &nde) {
