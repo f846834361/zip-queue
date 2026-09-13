@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useQuasar } from 'quasar'
+import { useRouter } from 'vue-router'
 import { useUiStore } from '../stores/ui'
 import { useBrowseStore } from '../stores/browse'
 import api from '../api'
 
 const $q = useQuasar()
+const router = useRouter()
 
 const ui = useUiStore()
 const browse = useBrowseStore()
@@ -48,6 +50,52 @@ async function refreshTaskStatus() {
     // 状态轮询失败静默忽略，不影响浏览与任务操作
   }
 }
+
+// 顶栏源路径搜索：QSelect + use-input + filter 实现自动补全，
+// 选中候选或回车/搜索图标跳转任务页按源路径筛选。
+const searchText = ref('')
+const searchSelection = ref<string | null>(null)
+const searchOptions = ref<string[]>([])
+const searchLoading = ref(false)
+
+// use-input 输入时触发：防抖由 QSelect 的 input-debounce 负责，这里拉取候选并写入 options
+function onFilter(val: string, update: (cb: () => void) => void, abort: () => void) {
+  const q = val.trim()
+  if (!q) {
+    update(() => {
+      searchOptions.value = []
+    })
+    return
+  }
+  searchLoading.value = true
+  api.suggestSourcePaths(q, 10)
+    .then((r) => {
+      update(() => {
+        searchOptions.value = r.items
+      })
+    })
+    .catch(() => abort())
+    .finally(() => {
+      searchLoading.value = false
+    })
+}
+
+// 同步输入框文本，供回车/搜索图标使用当前输入值
+function onInputValue(val: string | number | null) {
+  searchText.value = (val ?? '').toString()
+}
+
+// 执行搜索：跳转任务页，按源路径模糊筛选展示结果
+function doSearch(value: string) {
+  const v = value.trim()
+  if (!v) return
+  void router.push({ path: '/tasks', query: { source: v } })
+}
+
+// 从下拉候选中选择某项时触发
+function onSelect(val: string | null) {
+  if (val) doSearch(val)
+}
 </script>
 
 <template>
@@ -62,6 +110,40 @@ async function refreshTaskStatus() {
             Zip-Queue
           </router-link>
         </q-toolbar-title>
+
+        <q-space />
+
+        <div class="search-wrap q-mx-md">
+          <q-select
+            v-model="searchSelection"
+            :options="searchOptions"
+            use-input
+            input-debounce="250"
+            dense
+            outlined
+            rounded
+            clearable
+            placeholder="搜索源路径"
+            class="search-box"
+            :loading="searchLoading"
+            @filter="onFilter"
+            @input-value="onInputValue"
+            @update:model-value="onSelect"
+            @keyup.enter="doSearch(searchText)"
+          >
+            <template #no-option>
+              <q-item>
+                <q-item-section class="text-grey">无匹配源路径</q-item-section>
+              </q-item>
+            </template>
+            <template #append>
+              <q-icon name="search" class="cursor-pointer search-icon" @click="doSearch(searchText)" />
+            </template>
+          </q-select>
+        </div>
+
+        <q-space />
+
         <q-chip
           dense
           square
@@ -109,5 +191,24 @@ async function refreshTaskStatus() {
 }
 .logo-link:hover {
   opacity: 0.85;
+}
+.search-wrap {
+  position: relative;
+  width: 440px;
+  max-width: 50vw;
+}
+.search-box :deep(.q-field__control) {
+  background: #ffffff;
+}
+.search-box :deep(.q-field__native),
+.search-box :deep(.q-field__prefix),
+.search-box :deep(.q-field__suffix) {
+  color: #1d1d1d;
+}
+.search-box :deep(.q-field__label) {
+  color: rgba(0, 0, 0, 0.6);
+}
+.search-icon {
+  color: #757575;
 }
 </style>

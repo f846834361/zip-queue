@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { useQuasar } from 'quasar'
 import api, { type Task } from '../api'
 import DateTimePicker from '../components/DateTimePicker.vue'
@@ -10,11 +10,13 @@ import { usePolling } from '../composables/usePolling'
 
 const $q = useQuasar()
 const router = useRouter()
+const route = useRoute()
 
 const filters = reactive({
   status: '',
   type: '',
   source_path: '',
+  target_path: '',
   completed_after: '',
   completed_before: ''
 })
@@ -64,6 +66,7 @@ function buildParams() {
   if (filters.status) params.status = filters.status
   if (filters.type) params.type = filters.type
   if (filters.source_path) params.source_path = filters.source_path
+  if (filters.target_path) params.target_path = filters.target_path
   const after = toRFC3339(filters.completed_after)
   const before = toRFC3339(filters.completed_before)
   if (after) params.completed_after = after
@@ -183,7 +186,25 @@ async function deleteTask(row: Task) {
   })
 }
 
-onMounted(fetchList)
+// 从顶栏搜索跳转过来时，URL 带 ?source= 关键字，复用到任务页的源路径筛选。
+function applySourceQuery() {
+  const s = route.query.source
+  filters.source_path = typeof s === 'string' ? s : ''
+}
+
+// 已在任务页时再次从顶栏搜索：更新筛选条件并刷新（filters 的 deep watch 会防抖触发拉取）。
+watch(
+  () => route.query.source,
+  () => {
+    applySourceQuery()
+    page.value = 1
+  }
+)
+
+onMounted(() => {
+  applySourceQuery()
+  fetchList()
+})
 </script>
 
 <template>
@@ -215,8 +236,8 @@ onMounted(fetchList)
           </div>
           <div class="col-12 col-md-2">
             <q-input
-              v-model="filters.source_path"
-              label="源路径包含"
+              v-model="filters.target_path"
+              label="目标路径包含"
               outlined
               dense
               clearable

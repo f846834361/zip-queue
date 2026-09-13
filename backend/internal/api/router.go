@@ -30,6 +30,7 @@ func Register(r *gin.RouterGroup, gdb *gorm.DB, pool *worker.Pool, cfg *config.C
 	r.POST("/tasks/bulk-compress-folder", a.BulkCompress)
 	r.GET("/tasks", a.ListTasks)
 	r.GET("/tasks/active", a.ActiveTasks)
+	r.GET("/tasks/source-suggest", a.SuggestSourcePaths)
 	r.GET("/tasks/:id", a.GetTask)
 	r.POST("/tasks/:id/retry", a.RetryTask)
 	r.DELETE("/tasks/:id", a.DeleteTask)

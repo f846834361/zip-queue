@@ -116,8 +116,21 @@ async function pollOnce() {
   }
 }
 
+// 键盘 Backspace 返回上一级：编辑态（地址栏输入框）或焦点在输入框/文本域时不拦截，
+// 避免误删字符或干扰输入；仅在浏览态生效。
+function onKeydown(e: KeyboardEvent) {
+  if (editing.value) return
+  const t = e.target as HTMLElement | null
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return
+  if (e.key === 'Backspace') {
+    e.preventDefault()
+    goUp()
+  }
+}
+
 onUnmounted(() => {
   if (pollTimer !== null) clearInterval(pollTimer)
+  window.removeEventListener('keydown', onKeydown)
 })
 
 function parentPath(p: string): string | null {
@@ -345,6 +358,8 @@ onMounted(async () => {
   // 优先使用 store 中保存的路径，其次配置的默认路径
   const initialPath = browseStore.currentPath || config.value?.default_browse_path
   await load(initialPath || undefined)
+  // 键盘 Backspace 返回上一级目录（编辑态/输入聚焦时不拦截）
+  window.addEventListener('keydown', onKeydown)
 })
 
 function onRowClick(_evt: unknown, row: FsEntry) {

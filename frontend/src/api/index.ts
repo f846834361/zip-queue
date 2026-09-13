@@ -108,6 +108,11 @@ export interface ActiveResponse {
   active: boolean
 }
 
+export interface SuggestResponse {
+  /** 模糊匹配的源路径候选（去重） */
+  items: string[]
+}
+
 export interface Password {
   id: number
   value: string
@@ -165,6 +170,9 @@ export const api = {
   },
   async activeTasks(): Promise<ActiveResponse> {
     return (await http.get<ActiveResponse>('/tasks/active')).data
+  },
+  async suggestSourcePaths(q: string, limit = 10): Promise<SuggestResponse> {
+    return (await http.get<SuggestResponse>('/tasks/source-suggest', { params: { q, limit } })).data
   },
   async getTask(id: number | string): Promise<Task> {
     return (await http.get<Task>(`/tasks/${id}`)).data
