@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { computed, onMounted } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useQuasar } from 'quasar'
 import { useUiStore } from '../stores/ui'
 import { useBrowseStore } from '../stores/browse'
-import { compressionLabel } from '../utils/task'
+import api from '../api'
 
 const $q = useQuasar()
 
@@ -15,9 +15,6 @@ const leftDrawerOpen = computed({
   get: () => ui.leftDrawerOpen ?? $q.platform.is.desktop,
   set: (open: boolean) => ui.setLeftDrawerOpen(open)
 })
-
-// 配置由 browse store 缓存，与文件页共享同一次请求
-const config = computed(() => browse.config)
 
 const links = computed(() => [
   { to: '/', label: '文件浏览', icon: 'folder_open' },
@@ -31,7 +28,26 @@ onMounted(async () => {
   } catch (e) {
     $q.notify({ type: 'negative', message: (e as Error).message })
   }
+  // 顶栏后台任务状态：每 5 秒轮询轻量接口，仅判断是否有活跃任务
+  await refreshTaskStatus()
+  statusTimer = setInterval(refreshTaskStatus, 5000)
 })
+
+onUnmounted(() => {
+  if (statusTimer !== null) clearInterval(statusTimer)
+})
+
+// 后台是否活跃（执行中或排队中），仅用于顶栏展示，不展示具体任务明细
+const taskActive = ref(false)
+let statusTimer: ReturnType<typeof setInterval> | null = null
+async function refreshTaskStatus() {
+  try {
+    const r = await api.activeTasks()
+    taskActive.value = r.active
+  } catch {
+    // 状态轮询失败静默忽略，不影响浏览与任务操作
+  }
+}
 </script>
 
 <template>
@@ -46,12 +62,17 @@ onMounted(async () => {
             Zip-Queue
           </router-link>
         </q-toolbar-title>
-        <template v-if="config">
-          <q-chip dense square color="white" text-color="primary" class="q-mr-none">
-            压缩效率 {{ compressionLabel(config.compression_level) }}
-            <q-tooltip>当前压缩效率，可在配置页修改</q-tooltip>
-          </q-chip>
-        </template>
+        <q-chip
+          dense
+          square
+          :color="taskActive ? 'green' : 'grey-7'"
+          text-color="white"
+          class="q-mr-none"
+        >
+          <q-icon :name="taskActive ? 'sync' : 'check_circle'" size="xs" class="q-mr-xs" />
+          后台任务 · {{ taskActive ? '活跃' : '空闲' }}
+          <q-tooltip>{{ taskActive ? '有任务正在执行或排队中' : '当前无进行中的任务' }}</q-tooltip>
+        </q-chip>
       </q-toolbar>
     </q-header>
 

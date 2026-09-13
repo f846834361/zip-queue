@@ -350,6 +350,19 @@ func (a *API) BulkCompress(c *gin.Context) {
 	c.JSON(201, gin.H{"created": len(ids), "ids": ids, "skipped": dupSkipped})
 }
 
+// ActiveTasks 返回当前活跃（执行中/排队中）任务计数，供前端顶栏轻量展示后台繁忙状态。
+// 不返回具体任务明细，仅用于判断"是否有任务在运行中"。
+func (a *API) ActiveTasks(c *gin.Context) {
+	var running, pending int64
+	a.db.Model(&model.Task{}).Where("status = ?", model.StatusRunning).Count(&running)
+	a.db.Model(&model.Task{}).Where("status = ?", model.StatusPending).Count(&pending)
+	c.JSON(200, gin.H{
+		"running": running,
+		"pending": pending,
+		"active":  running+pending > 0,
+	})
+}
+
 // ListTasks 分页 + 筛选任务列表。
 func (a *API) ListTasks(c *gin.Context) {
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))

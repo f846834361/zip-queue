@@ -99,6 +99,15 @@ export interface WakeResponse {
   running: number
 }
 
+export interface ActiveResponse {
+  /** 当前执行中任务数 */
+  running: number
+  /** 当前排队中任务数 */
+  pending: number
+  /** 是否存在活跃（执行中或排队中）任务，供顶栏展示后台繁忙状态 */
+  active: boolean
+}
+
 export interface Password {
   id: number
   value: string
@@ -153,6 +162,9 @@ export const api = {
   },
   async listTasks(params: Record<string, string | number>): Promise<TaskListResponse> {
     return (await http.get<TaskListResponse>('/tasks', { params })).data
+  },
+  async activeTasks(): Promise<ActiveResponse> {
+    return (await http.get<ActiveResponse>('/tasks/active')).data
   },
   async getTask(id: number | string): Promise<Task> {
     return (await http.get<Task>(`/tasks/${id}`)).data

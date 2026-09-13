@@ -15,6 +15,7 @@ frontend/.playwright-cli
 backend/web/dist/*
 !backend/web/dist/.gitkeep
 frontend/main.yaml
+
 # Data
 /data/
 *.db
