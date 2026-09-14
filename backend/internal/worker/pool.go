@@ -25,15 +25,31 @@ type Pool struct {
 	mu      sync.Mutex
 	max     int
 	running int
+
+	// 取消控制：每个正在执行的任务持有一个可取消的 ctx，CancelTask 通过 cancel 函数
+	// 打断其 IO；cancelled 记录用户主动取消的任务，供 runner 区分「用户取消」与「服务中断」。
+	cancelMu  sync.Mutex
+	cancels   map[uint]context.CancelFunc
+	cancelled map[uint]struct{}
 }
 
 func NewPool(db *gorm.DB, runner *Runner, concurrency int) *Pool {
 	return &Pool{
-		db:     db,
-		runner: runner,
-		wake:   make(chan struct{}, 1),
-		max:    setting.ClampConcurrency(concurrency),
+		db:        db,
+		runner:    runner,
+		wake:      make(chan struct{}, 1),
+		max:       setting.ClampConcurrency(concurrency),
+		cancels:   make(map[uint]context.CancelFunc),
+		cancelled: make(map[uint]struct{}),
 	}
+}
+
+// SetRunner 在 runner 与 pool 互相引用时，于二者都构造完成后回填 runner。
+// （NewPool 需 runner，NewRunner 需 pool 作为 CancelChecker，故先建 pool 再建 runner。）
+func (p *Pool) SetRunner(r *Runner) {
+	p.mu.Lock()
+	p.runner = r
+	p.mu.Unlock()
 }
 
 // SetConcurrency 调整并发上限（夹紧到合法范围），返回实际生效值。
@@ -90,6 +106,46 @@ func (p *Pool) release() {
 	p.mu.Lock()
 	p.running--
 	p.mu.Unlock()
+}
+
+// registerCancel 记录任务的取消函数（任务开始执行时调用）。
+func (p *Pool) registerCancel(id uint, cancel context.CancelFunc) {
+	p.cancelMu.Lock()
+	p.cancels[id] = cancel
+	p.cancelMu.Unlock()
+}
+
+// unregisterCancel 任务结束后清理：释放 ctx 并移除取消记录（避免泄漏）。
+func (p *Pool) unregisterCancel(id uint) {
+	p.cancelMu.Lock()
+	if c, ok := p.cancels[id]; ok {
+		c()
+		delete(p.cancels, id)
+	}
+	delete(p.cancelled, id)
+	p.cancelMu.Unlock()
+}
+
+// CancelTask 主动取消指定任务：仅当任务正在执行（已注册取消函数）时有效。
+// 标记 cancelled 并触发其 ctx 取消；runner 收尾时据此清理临时文件并落库为 cancelled。
+// 返回是否成功发送取消信号（false 表示任务已结束或尚未执行）。
+func (p *Pool) CancelTask(id uint) bool {
+	p.cancelMu.Lock()
+	c, ok := p.cancels[id]
+	if ok {
+		p.cancelled[id] = struct{}{}
+		c()
+	}
+	p.cancelMu.Unlock()
+	return ok
+}
+
+// IsCancelled 判断任务是否由用户主动取消（runner 用以区分服务中断重排）。
+func (p *Pool) IsCancelled(id uint) bool {
+	p.cancelMu.Lock()
+	_, ok := p.cancelled[id]
+	p.cancelMu.Unlock()
+	return ok
 }
 
 // loop 调度主循环：纯事件驱动（建任务 / 任务结束 / 调整并发 / 重试 / 手动唤醒），
@@ -171,12 +227,15 @@ func (p *Pool) dispatch(ctx context.Context) {
 
 		p.wg.Add(1)
 		go func(t model.Task) {
+			taskCtx, cancel := context.WithCancel(ctx)
+			p.registerCancel(t.ID, cancel)
 			defer func() {
+				p.unregisterCancel(t.ID)
 				p.release()
 				p.wg.Done()
 				p.Enqueue()
 			}()
-			p.runner.Run(ctx, &t)
+			p.runner.Run(taskCtx, &t)
 		}(task)
 	}
 }

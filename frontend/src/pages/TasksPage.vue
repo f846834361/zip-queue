@@ -26,7 +26,8 @@ const statusOptions = [
   { label: '待处理', value: 'pending' },
   { label: '执行中', value: 'running' },
   { label: '成功', value: 'succeeded' },
-  { label: '失败', value: 'failed' }
+  { label: '失败', value: 'failed' },
+  { label: '已取消', value: 'cancelled' }
 ]
 const typeOptions = [
   { label: '全部', value: '' },
@@ -186,6 +187,23 @@ async function deleteTask(row: Task) {
   })
 }
 
+async function cancelTask(row: Task) {
+  $q.dialog({
+    title: '取消任务',
+    message: `确定取消任务 #${row.id} 吗？${row.status === 'running' ? '正在进行的临时文件会被清理。' : ''}`,
+    ok: { label: '取消任务', color: 'warning', unelevated: true },
+    cancel: { label: '返回', flat: true }
+  }).onOk(async () => {
+    try {
+      await api.cancelTask(row.id)
+      $q.notify({ type: 'positive', message: '已取消任务' })
+      await fetchList()
+    } catch (e) {
+      $q.notify({ type: 'negative', message: (e as Error).message })
+    }
+  })
+}
+
 // 从顶栏搜索跳转过来时，URL 带 ?source= 关键字，复用到任务页的源路径筛选。
 function applySourceQuery() {
   const s = route.query.source
@@ -328,6 +346,17 @@ onMounted(() => {
               @click.stop="openDetail(props.row)"
             >
               <q-tooltip>查看详情</q-tooltip>
+            </q-btn>
+            <q-btn
+              v-if="props.row.status === 'pending' || props.row.status === 'running'"
+              flat
+              dense
+              round
+              color="warning"
+              icon="cancel"
+              @click.stop="cancelTask(props.row)"
+            >
+              <q-tooltip>取消任务</q-tooltip>
             </q-btn>
             <q-btn
               v-if="props.row.status === 'succeeded' || props.row.status === 'failed'"

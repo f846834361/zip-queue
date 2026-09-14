@@ -42,14 +42,20 @@ func loadCompressionLevel(db *gorm.DB) archive.Level {
 	return archive.ParseLevel(setting.Get(db, setting.KeyCompressionLevel))
 }
 
+// CancelChecker 供 Runner 判断某任务是否由用户主动取消（以区分服务中断重排）。
+type CancelChecker interface {
+	IsCancelled(taskID uint) bool
+}
+
 // Runner 执行单个任务（解压或压缩）的全部副作用：临时目录、进度落库、替换原文件、清理。
 type Runner struct {
 	db     *gorm.DB
 	limits archive.Limits
+	chk    CancelChecker
 }
 
-func NewRunner(db *gorm.DB, limits archive.Limits) *Runner {
-	return &Runner{db: db, limits: limits}
+func NewRunner(db *gorm.DB, limits archive.Limits, chk CancelChecker) *Runner {
+	return &Runner{db: db, limits: limits, chk: chk}
 }
 
 // Run 执行一个已处于 running 状态的任务。
@@ -101,6 +107,11 @@ func (r *Runner) runDecompress(ctx context.Context, task *model.Task) {
 
 	if err := archive.Extract(ctx, src, tempDir, loadPasswords(r.db), r.limits, r.progressFn(task)); err != nil {
 		if ctx.Err() != nil {
+			if r.chk != nil && r.chk.IsCancelled(task.ID) {
+				// 用户主动取消：清理临时文件并标记 cancelled（不重排）
+				r.finishCancelled(task)
+				return
+			}
 			// 服务停止/重启导致的中断：删除临时文件，可安全重做的补一条待执行任务
 			FinishInterrupted(r.db, task)
 			return
@@ -165,6 +176,11 @@ func (r *Runner) runCompress(ctx context.Context, task *model.Task) {
 
 	if err := archive.Compress(ctx, src, tempZip, level, r.progressFn(task)); err != nil {
 		if ctx.Err() != nil {
+			if r.chk != nil && r.chk.IsCancelled(task.ID) {
+				// 用户主动取消：清理临时文件并标记 cancelled（不重排）
+				r.finishCancelled(task)
+				return
+			}
 			// 服务停止/重启导致的中断：删除临时文件，可安全重做的补一条待执行任务
 			FinishInterrupted(r.db, task)
 			return
@@ -232,6 +248,20 @@ func (r *Runner) succeed(task *model.Task) {
 		"temp_path":        "",
 		"error":            "",
 	}, "写入成功状态")
+}
+
+// finishCancelled 收尾被用户取消的任务：清理临时文件（解压临时目录或临时压缩包）、
+// 标记 cancelled；不重排（用户主动取消，不应自动续做），源/目标文件均保留。
+func (r *Runner) finishCancelled(task *model.Task) {
+	if task.TempPath != "" {
+		_ = os.RemoveAll(task.TempPath)
+	}
+	r.updateTask(task.ID, map[string]interface{}{
+		"status":       model.StatusCancelled,
+		"completed_at": time.Now(),
+		"temp_path":    "",
+		"error":        "任务已被用户取消",
+	}, "写入取消状态")
 }
 
 // updateTask 写入任务字段，失败时重试一次并记录日志。

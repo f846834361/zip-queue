@@ -40,7 +40,7 @@ export interface Task {
   source_path: string
   target_path: string
   temp_path: string
-  status: 'pending' | 'running' | 'succeeded' | 'failed'
+  status: 'pending' | 'running' | 'succeeded' | 'failed' | 'cancelled'
   progress_percent: number
   processed_bytes: number
   total_bytes: number
@@ -182,6 +182,9 @@ export const api = {
   },
   async retryTask(id: number | string): Promise<RetryTaskResponse> {
     return (await http.post<RetryTaskResponse>(`/tasks/${id}/retry`)).data
+  },
+  async cancelTask(id: number | string): Promise<void> {
+    await http.post(`/tasks/${id}/cancel`)
   },
   async listPasswords(
     params: { page?: number; page_size?: number; sort_by?: string; desc?: boolean } = {}

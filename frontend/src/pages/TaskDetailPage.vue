@@ -25,8 +25,12 @@ const pollIntervalText = `每 ${POLL_INTERVAL / 1000} 秒更新`
 const taskId = computed(() => Number(props.id ?? route.params.id))
 const isRunning = computed(() => task.value?.status === 'running')
 const isPending = computed(() => task.value?.status === 'pending')
+const isCancelled = computed(() => task.value?.status === 'cancelled')
 const isFinished = computed(
-  () => task.value?.status === 'succeeded' || task.value?.status === 'failed'
+  () =>
+    task.value?.status === 'succeeded' ||
+    task.value?.status === 'failed' ||
+    task.value?.status === 'cancelled'
 )
 const isFailed = computed(() => task.value?.status === 'failed')
 
@@ -98,6 +102,24 @@ async function retryTask() {
   }
 }
 
+async function cancelTask() {
+  if (!task.value) return
+  $q.dialog({
+    title: '取消任务',
+    message: `确定取消任务 #${task.value.id} 吗？`,
+    ok: { label: '取消任务', color: 'warning', unelevated: true },
+    cancel: { label: '返回', flat: true }
+  }).onOk(async () => {
+    try {
+      await api.cancelTask(task.value!.id)
+      $q.notify({ type: 'positive', message: '已取消任务' })
+      await refresh()
+    } catch (e) {
+      $q.notify({ type: 'negative', message: (e as Error).message })
+    }
+  })
+}
+
 watch(taskId, () => {
   polling.stop()
   void loadInitial()
@@ -132,6 +154,16 @@ onMounted(loadInitial)
           {{ retried ? '本页已发起重试，刷新页面后可再次重试' : '按原类型与原路径重新创建一条待执行任务' }}
         </q-tooltip>
       </q-btn>
+      <q-btn
+        v-if="task && (isPending || isRunning)"
+        color="warning"
+        icon="cancel"
+        label="取消任务"
+        outline
+        no-caps
+        class="q-mr-sm"
+        @click="cancelTask"
+      />
       <q-btn
         v-if="task && isFinished"
         color="negative"

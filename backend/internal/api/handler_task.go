@@ -565,8 +565,8 @@ func (a *API) DeleteTask(c *gin.Context) {
 		c.JSON(500, gin.H{"error": err.Error()})
 		return
 	}
-	if task.Status != model.StatusSucceeded && task.Status != model.StatusFailed {
-		c.JSON(400, gin.H{"error": "only finished tasks (succeeded/failed) can be deleted"})
+	if task.Status != model.StatusSucceeded && task.Status != model.StatusFailed && task.Status != model.StatusCancelled {
+		c.JSON(400, gin.H{"error": "only finished tasks (succeeded/failed/cancelled) can be deleted"})
 		return
 	}
 	a.db.Delete(&task)
@@ -574,6 +574,59 @@ func (a *API) DeleteTask(c *gin.Context) {
 	// 下次搜索命中 miss 会重新查库并恢复（若仍被其他任务引用则照常返回）。
 	invalidateSuggestCache(task.SourcePath)
 	c.JSON(200, gin.H{"ok": true})
+}
+
+// CancelTask 取消任务：仅 pending / running 可取消。
+// pending：尚未执行、无临时文件，直接标记 cancelled。
+// running：通知 worker 取消正在进行的 IO 并清理临时文件，由 runner 收尾为 cancelled。
+func (a *API) CancelTask(c *gin.Context) {
+	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
+	if err != nil {
+		c.JSON(400, gin.H{"error": "invalid id"})
+		return
+	}
+	var task model.Task
+	if err := a.db.First(&task, id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			c.JSON(404, gin.H{"error": "task not found"})
+			return
+		}
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	switch task.Status {
+	case model.StatusPending:
+		// 条件更新：若此刻已被调度器派发（变成 running），则改走 running 取消路径
+		res := a.db.Model(&model.Task{}).
+			Where("id = ? AND status = ?", id, model.StatusPending).
+			Updates(map[string]interface{}{
+				"status":       model.StatusCancelled,
+				"completed_at": time.Now(),
+				"temp_path":    "",
+				"error":        "任务已被用户取消",
+			})
+		if res.Error != nil {
+			c.JSON(500, gin.H{"error": res.Error.Error()})
+			return
+		}
+		if res.RowsAffected == 0 {
+			if a.pool.CancelTask(task.ID) {
+				c.JSON(200, gin.H{"ok": true})
+				return
+			}
+			c.JSON(409, gin.H{"error": "任务状态已变化，无法取消"})
+			return
+		}
+		c.JSON(200, gin.H{"ok": true})
+	case model.StatusRunning:
+		if !a.pool.CancelTask(task.ID) {
+			c.JSON(409, gin.H{"error": "任务正在收尾或已结束，无法取消"})
+			return
+		}
+		c.JSON(200, gin.H{"ok": true})
+	default:
+		c.JSON(400, gin.H{"error": "只有待处理或执行中的任务可以取消"})
+	}
 }
 
 // parseTime 解析任务筛选时间参数。

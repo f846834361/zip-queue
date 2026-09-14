@@ -14,6 +14,7 @@ const (
 	StatusRunning   = "running"
 	StatusSucceeded = "succeeded"
 	StatusFailed    = "failed"
+	StatusCancelled = "cancelled"
 )
 
 // Task 对应一个文件的处理任务（解压或压缩）。
