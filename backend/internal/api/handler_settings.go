@@ -37,6 +37,7 @@ type updateConfigRequest struct {
 	CompressionLevel    *string `json:"compression_level"`
 	StripFolder         *bool   `json:"strip_folder"`
 	AddFolderMode       *string `json:"add_folder_mode"`
+	SkipCompressed      *bool   `json:"skip_compressed"`
 }
 
 // UpdateConfig 更新可在配置页修改的运行期配置项。
@@ -91,6 +92,12 @@ func (a *API) UpdateConfig(c *gin.Context) {
 	}
 	if req.AddFolderMode != nil {
 		if err := setting.Set(a.db, setting.KeyAddFolderMode, *req.AddFolderMode); err != nil {
+			c.JSON(500, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	if req.SkipCompressed != nil {
+		if err := setting.Set(a.db, setting.KeySkipCompressed, strconv.FormatBool(*req.SkipCompressed)); err != nil {
 			c.JSON(500, gin.H{"error": err.Error()})
 			return
 		}

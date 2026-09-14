@@ -3,6 +3,7 @@
 package setting
 
 import (
+	"strconv"
 	"time"
 
 	"gorm.io/gorm"
@@ -25,6 +26,9 @@ const (
 	KeyStripFolder = "strip_folder"
 	// KeyAddFolderMode 解压"智能添加文件夹"模式（取值见 AddFolder* 常量）。
 	KeyAddFolderMode = "add_folder_mode"
+	// KeySkipCompressed 压缩时"跳过已压缩文件"开关：开启后，压缩包/已压缩图片音视频/
+	// zip 系文档等本身不可再压缩的文件会直接排除，不写入压缩包，避免二次压缩。
+	KeySkipCompressed = "skip_compressed"
 )
 
 // 解压"智能添加文件夹"模式的可选值（与配置页下拉框、后端校验共用）。
@@ -79,4 +83,10 @@ func ClampConcurrency(n int) int {
 		return MaxConcurrency
 	}
 	return n
+}
+
+// SkipCompressed 读取"压缩时跳过已压缩文件"开关，默认 false。
+func SkipCompressed(db *gorm.DB) bool {
+	v, err := strconv.ParseBool(Get(db, KeySkipCompressed))
+	return err == nil && v
 }

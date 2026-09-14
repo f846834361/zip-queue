@@ -28,6 +28,12 @@ func (a *API) addFolderMode() string {
 	return v
 }
 
+// skipCompressed 读取"压缩时跳过已压缩文件"开关，默认 false。
+func (a *API) skipCompressed() bool {
+	v, err := strconv.ParseBool(setting.Get(a.db, setting.KeySkipCompressed))
+	return err == nil && v
+}
+
 // configResponse 返回前端需要展示/编辑的运行参数。
 // max_concurrent_tasks 与 compression_level 取页面保存后的生效值（DB 覆盖优先）。
 func (a *API) configResponse() gin.H {
@@ -38,6 +44,7 @@ func (a *API) configResponse() gin.H {
 		"compression_level":    a.compressionLevel(),
 		"strip_folder":         a.stripFolder(),
 		"add_folder_mode":      a.addFolderMode(),
+		"skip_compressed":      a.skipCompressed(),
 	}
 }
 

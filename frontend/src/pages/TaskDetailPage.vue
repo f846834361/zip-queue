@@ -25,7 +25,6 @@ const pollIntervalText = `每 ${POLL_INTERVAL / 1000} 秒更新`
 const taskId = computed(() => Number(props.id ?? route.params.id))
 const isRunning = computed(() => task.value?.status === 'running')
 const isPending = computed(() => task.value?.status === 'pending')
-const isCancelled = computed(() => task.value?.status === 'cancelled')
 const isFinished = computed(
   () =>
     task.value?.status === 'succeeded' ||

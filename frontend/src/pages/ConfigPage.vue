@@ -42,6 +42,10 @@ const savingStrip = ref(false)
 const addFolderMode = ref<'one' | 'multiple' | 'none'>('none')
 const savingAddFolder = ref(false)
 
+// 压缩"跳过已压缩文件"开关（持久化在后端 settings）
+const skipCompressed = ref(false)
+const savingSkip = ref(false)
+
 // 任务与压缩设置（持久化在后端 settings）
 const maxConcurrentTasks = ref(1)
 const compressionLevel = ref<AppConfig['compression_level']>('normal')
@@ -129,6 +133,7 @@ async function loadConfig() {
     addFolderMode.value = (cfg.add_folder_mode as 'one' | 'multiple' | 'none') || 'none'
     maxConcurrentTasks.value = cfg.max_concurrent_tasks || 1
     compressionLevel.value = cfg.compression_level || 'normal'
+    skipCompressed.value = cfg.skip_compressed === true
   } catch (e) {
     $q.notify({ type: 'negative', message: (e as Error).message })
   }
@@ -187,6 +192,26 @@ async function saveAddFolderMode(val: 'one' | 'multiple' | 'none') {
     $q.notify({ type: 'negative', message: (e as Error).message })
   } finally {
     savingAddFolder.value = false
+  }
+}
+
+async function saveSkipCompressed(val: boolean) {
+  if (savingSkip.value) return
+  const prev = skipCompressed.value
+  savingSkip.value = true
+  try {
+    const cfg = await api.updateConfig({ skip_compressed: val })
+    browseStore.setConfig(cfg)
+    skipCompressed.value = cfg.skip_compressed === true
+    $q.notify({
+      type: 'positive',
+      message: val ? '已开启跳过已压缩文件' : '已关闭跳过已压缩文件'
+    })
+  } catch (e) {
+    skipCompressed.value = prev
+    $q.notify({ type: 'negative', message: (e as Error).message })
+  } finally {
+    savingSkip.value = false
   }
 }
 
@@ -502,6 +527,23 @@ onMounted(() => {
             :disable="savingStrip"
             color="primary"
             @update:model-value="saveStripFolder"
+          />
+        </div>
+
+        <q-separator class="q-my-md" />
+
+        <div class="row items-center justify-between">
+          <div class="q-pr-lg">
+            <div class="text-subtitle1 text-weight-medium">跳过已压缩文件</div>
+            <div class="text-caption text-grey-7 q-mt-xs">
+              压缩时直接排除已压缩格式（zip / 7z / rar / jpg / mp4 / pdf 等），不写入压缩包，避免二次压缩（浪费 CPU 且常体积反增）。开启后若选中的文件全部为已压缩格式，任务会提示无可压缩内容。仅影响此后开始的任务。
+            </div>
+          </div>
+          <q-toggle
+            v-model="skipCompressed"
+            :disable="savingSkip"
+            color="primary"
+            @update:model-value="saveSkipCompressed"
           />
         </div>
 

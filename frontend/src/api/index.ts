@@ -75,6 +75,8 @@ export interface AppConfig {
   add_folder_mode?: 'one' | 'multiple' | 'none'
   /** 压缩效率：fastest 特快（仅打包）/ fast 快 / normal 中 / slow 慢 */
   compression_level: 'fastest' | 'fast' | 'normal' | 'slow'
+  /** 压缩时跳过已压缩文件（zip/7z/jpg/mp4/pdf 等），直接排除不写入压缩包，避免二次压缩 */
+  skip_compressed?: boolean
 }
 
 /** 可在配置页修改、提交到后端保存的字段（均为可选，只传需要变更的项）。 */
@@ -84,6 +86,7 @@ export interface UpdateConfigBody {
   compression_level?: AppConfig['compression_level']
   strip_folder?: boolean
   add_folder_mode?: AppConfig['add_folder_mode']
+  skip_compressed?: boolean
 }
 
 export interface BulkResponse {

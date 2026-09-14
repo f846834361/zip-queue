@@ -242,7 +242,7 @@ func (r *Runner) runCompress(ctx context.Context, task *model.Task) {
 	stripFolder := loadStripFolder(r.db)
 	r.updateTask(task.ID, map[string]interface{}{"compression_level": string(level)}, "写入压缩效率档位")
 
-	if err := archive.Compress(ctx, src, tempZip, level, stripFolder, r.progressFn(task)); err != nil {
+	if err := archive.Compress(ctx, src, tempZip, level, stripFolder, setting.SkipCompressed(r.db), r.progressFn(task)); err != nil {
 		if ctx.Err() != nil {
 			if r.chk != nil && r.chk.IsCancelled(task.ID) {
 				// 用户主动取消：清理临时文件并标记 cancelled（不重排）

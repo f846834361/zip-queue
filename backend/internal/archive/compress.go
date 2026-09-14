@@ -69,7 +69,9 @@ func (l Level) FlateLevel() int {
 // stripFolder 为 true 时采用修复 commit 2f948182a 之前的逻辑：zip 内不保留
 // 被选中的顶层文件夹这一层（条目退化成 a.txt / sub/b.txt）；false（默认）保留
 // 顶层目录（MyFolder/a.txt），与 PC 上「右键文件夹 → 压缩」一致。
-func Compress(ctx context.Context, src, destZip string, level Level, stripFolder bool, p ProgressFn) error {
+// skipCompressed 为 true 时，压缩包/已压缩图片音视频/zip 系文档等本身不可再压缩
+// 的文件会被直接排除（不写入压缩包），避免二次压缩（徒增 CPU 且常体积反增）。
+func Compress(ctx context.Context, src, destZip string, level Level, stripFolder bool, skipCompressed bool, p ProgressFn) error {
 	info, err := os.Stat(src)
 	if err != nil {
 		return err
@@ -92,6 +94,9 @@ func Compress(ctx context.Context, src, destZip string, level Level, stripFolder
 			if info.IsDir() {
 				return nil
 			}
+			if skipCompressed && IsIncompressible(path) {
+				return nil
+			}
 			files = append(files, path)
 			totalBytes += info.Size()
 			return nil
@@ -101,10 +106,17 @@ func Compress(ctx context.Context, src, destZip string, level Level, stripFolder
 		}
 	} else {
 		basePath = filepath.Dir(src)
-		files = []string{src}
-		totalBytes = info.Size()
+		if skipCompressed && IsIncompressible(src) {
+			// 单文件且为已压缩格式：开启跳过时无任何可压缩内容
+		} else {
+			files = []string{src}
+			totalBytes = info.Size()
+		}
 	}
 	if len(files) == 0 {
+		if skipCompressed {
+			return fmt.Errorf("no files to compress: all files in %s are already compressed and were skipped", src)
+		}
 		return fmt.Errorf("no files to compress in %s", src)
 	}
 	if err := os.MkdirAll(filepath.Dir(destZip), 0o755); err != nil {
