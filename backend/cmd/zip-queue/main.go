@@ -3,13 +3,16 @@ package main
 import (
 	"context"
 	"flag"
+	"io"
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"syscall"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 
 	"zip-queue/internal/archive"
@@ -28,6 +31,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("load config: %v", err)
 	}
+
+	setupLogging(cfg)
 
 	gdb, err := db.Open(cfg.DB.Path, cfg.Log.Level)
 	if err != nil {
@@ -91,6 +96,34 @@ func main() {
 		log.Println("warning: workers 未在 30s 内收尾，强制退出")
 	}
 	log.Println("zip-queue stopped")
+}
+
+// setupLogging 在 persist 开启时把标准 log 与 gin 访问日志同时写入日志文件（仍保留 stderr），
+// 使容器部署也能把日志落盘持久化；未开启则维持默认的 stderr 输出。
+func setupLogging(cfg *config.Config) {
+	if !cfg.Log.Persist {
+		return
+	}
+	path := cfg.Log.File
+	if path == "" {
+		path = "./logs/zip-queue.log"
+	}
+	if dir := filepath.Dir(path); dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			log.Printf("无法创建日志目录 %s，日志仍仅输出到 stderr：%v", dir, err)
+			return
+		}
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		log.Printf("无法打开日志文件 %s，日志仍仅输出到 stderr：%v", path, err)
+		return
+	}
+	w := io.MultiWriter(os.Stderr, f)
+	log.SetOutput(w)
+	// gin 访问日志默认走 gin.DefaultWriter，与标准 log 共用同一落盘点以免日志分散。
+	gin.DefaultWriter = w
+	log.Printf("日志持久化已开启，写入文件：%s", path)
 }
 
 // resolveConcurrency 决定启动时的并发数：settings 表中保存的页面配置优先，

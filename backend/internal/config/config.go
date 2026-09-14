@@ -45,7 +45,12 @@ type BrowseConfig struct {
 }
 
 type LogConfig struct {
-	Level string `yaml:"level"`
+	Level   string `yaml:"level"`
+	// Persist 是否把日志持久化到文件（除 stderr 外额外写入 Log.File）。
+	// Docker 部署可用环境变量 LOG_PERSIST 覆盖；默认 false。
+	Persist bool `yaml:"persist"`
+	// File 日志文件路径（Persist 为 true 时生效）。可用环境变量 LOG_FILE 覆盖。
+	File string `yaml:"file"`
 }
 
 // Load 从给定路径读取并解析 YAML 配置，填充默认值，
@@ -93,6 +98,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Log.Level == "" {
 		c.Log.Level = "info"
+	}
+	if c.Log.File == "" {
+		c.Log.File = "./logs/zip-queue.log"
 	}
 }
 
@@ -154,6 +162,16 @@ func (c *Config) applyEnvOverrides() error {
 	}
 	if v := os.Getenv("LOG_LEVEL"); v != "" {
 		c.Log.Level = v
+	}
+	if v := os.Getenv("LOG_PERSIST"); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return fmt.Errorf("invalid LOG_PERSIST %q: %w", v, err)
+		}
+		c.Log.Persist = b
+	}
+	if v := os.Getenv("LOG_FILE"); v != "" {
+		c.Log.File = v
 	}
 	return nil
 }

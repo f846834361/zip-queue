@@ -15,3 +15,5 @@ browse:
 
 log:
   level: error               # debug / info / warn / error
+  persist: false             # 是否把日志持久化到文件（默认否；Docker 可用 LOG_PERSIST=true 开启）
+  file: ./logs/zip-queue.log # 日志文件路径（persist 为 true 时生效；可用 LOG_FILE 覆盖）

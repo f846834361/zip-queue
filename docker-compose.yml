@@ -14,10 +14,13 @@ services:
       # 如需浏览/处理宿主机特定目录，取消注释并修改路径：
       # - /host/path/to/files:/data/files
     environment:
-      # 可通过环境变量覆盖配置（可选）
-      # ZQ_SERVER_PORT: "8787"
-      # ZQ_WORKER_MAX_CONCURRENT_TASKS: "1"
-      # ZQ_LOG_LEVEL: "info"
+      # 可通过环境变量覆盖配置（变量名以 config.go 的 applyEnvOverrides 为准，无 ZQ_ 前缀）
+      # SERVER_PORT: "8787"
+      # WORKER_MAX_CONCURRENT_TASKS: "1"
+      # LOG_LEVEL: "info"
+      # 日志持久化：开启后日志额外写入 LOG_FILE（需落在已挂载的 /data 卷下，默认已挂 zip-queue-data:/data）
+      # LOG_PERSIST: "true"
+      # LOG_FILE: "/data/logs/zip-queue.log"
       TZ: Asia/Shanghai
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8787/api/health"]
