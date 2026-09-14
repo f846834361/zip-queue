@@ -40,7 +40,7 @@ export interface Task {
   source_path: string
   target_path: string
   temp_path: string
-  status: 'pending' | 'running' | 'succeeded' | 'failed'
+  status: 'pending' | 'running' | 'succeeded' | 'failed' | 'cancelled'
   progress_percent: number
   processed_bytes: number
   total_bytes: number
@@ -69,8 +69,14 @@ export interface AppConfig {
   max_concurrent_tasks: number
   default_browse_path: string
   penetrate_subfolders: boolean
+  /** 压缩时是否去掉顶层文件夹：true 则 zip 内不保留选中文件夹这一层（修复前逻辑）；false 保留（当前默认逻辑）。 */
+  strip_folder?: boolean
+  /** 解压"智能添加文件夹"模式：one=1个 / multiple=多个 / none=无 */
+  add_folder_mode?: 'one' | 'multiple' | 'none'
   /** 压缩效率：fastest 特快（仅打包）/ fast 快 / normal 中 / slow 慢 */
   compression_level: 'fastest' | 'fast' | 'normal' | 'slow'
+  /** 压缩时跳过已压缩文件（zip/7z/jpg/mp4/pdf 等），直接排除不写入压缩包，避免二次压缩 */
+  skip_compressed?: boolean
 }
 
 /** 可在配置页修改、提交到后端保存的字段（均为可选，只传需要变更的项）。 */
@@ -78,6 +84,9 @@ export interface UpdateConfigBody {
   penetrate_subfolders?: boolean
   max_concurrent_tasks?: number
   compression_level?: AppConfig['compression_level']
+  strip_folder?: boolean
+  add_folder_mode?: AppConfig['add_folder_mode']
+  skip_compressed?: boolean
 }
 
 export interface BulkResponse {
@@ -182,6 +191,9 @@ export const api = {
   },
   async retryTask(id: number | string): Promise<RetryTaskResponse> {
     return (await http.post<RetryTaskResponse>(`/tasks/${id}/retry`)).data
+  },
+  async cancelTask(id: number | string): Promise<void> {
+    await http.post(`/tasks/${id}/cancel`)
   },
   async listPasswords(
     params: { page?: number; page_size?: number; sort_by?: string; desc?: boolean } = {}

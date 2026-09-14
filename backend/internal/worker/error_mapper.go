@@ -88,6 +88,11 @@ func classifyError(err error) string {
 		return "文件夹内没有可压缩的文件。"
 	}
 
+	// 9b. 已压缩文件被全部跳过
+	if strings.Contains(lower, "already compressed") && strings.Contains(lower, "skipped") {
+		return "所选文件均为已压缩格式，已按「跳过已压缩文件」设置全部排除，没有可压缩的内容。"
+	}
+
 	// 10. 回退：返回原始信息
 	return "操作失败：" + msg
 }

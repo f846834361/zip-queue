@@ -25,6 +25,7 @@ export function statusColor(status: string): string {
     case 'running': return 'blue-7'
     case 'succeeded': return 'green-7'
     case 'failed': return 'red-7'
+    case 'cancelled': return 'orange-7'
     default: return 'grey-6'
   }
 }
@@ -35,6 +36,7 @@ export function statusLabel(status: string): string {
     case 'running': return '执行中'
     case 'succeeded': return '成功'
     case 'failed': return '失败'
+    case 'cancelled': return '已取消'
     default: return status
   }
 }

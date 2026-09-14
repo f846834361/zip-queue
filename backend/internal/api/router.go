@@ -33,6 +33,7 @@ func Register(r *gin.RouterGroup, gdb *gorm.DB, pool *worker.Pool, cfg *config.C
 	r.GET("/tasks/source-suggest", a.SuggestSourcePaths)
 	r.GET("/tasks/:id", a.GetTask)
 	r.POST("/tasks/:id/retry", a.RetryTask)
+	r.POST("/tasks/:id/cancel", a.CancelTask)
 	r.DELETE("/tasks/:id", a.DeleteTask)
 
 	r.GET("/passwords", a.ListPasswords)

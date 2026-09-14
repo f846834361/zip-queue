@@ -34,6 +34,18 @@ const duplicateError = ref('')
 const penetrateSubfolders = ref(false)
 const savingPenetrate = ref(false)
 
+// 压缩"去掉顶层文件夹"开关（持久化在后端 settings）
+const stripFolder = ref(false)
+const savingStrip = ref(false)
+
+// 解压"智能添加文件夹"模式（持久化在后端 settings）
+const addFolderMode = ref<'one' | 'multiple' | 'none'>('none')
+const savingAddFolder = ref(false)
+
+// 压缩"跳过已压缩文件"开关（持久化在后端 settings）
+const skipCompressed = ref(false)
+const savingSkip = ref(false)
+
 // 任务与压缩设置（持久化在后端 settings）
 const maxConcurrentTasks = ref(1)
 const compressionLevel = ref<AppConfig['compression_level']>('normal')
@@ -50,6 +62,13 @@ const concurrencyOptions = [
 const compressionOptions = (Object.keys(COMPRESSION_LABELS) as AppConfig['compression_level'][]).map(
   (value) => ({ label: COMPRESSION_LABELS[value], value })
 )
+
+// 解压"智能添加文件夹"可选值，与后端 setting.AddFolder* 对应
+const addFolderOptions: { label: string; value: 'one' | 'multiple' | 'none' }[] = [
+  { label: '1个', value: 'one' },
+  { label: '多个', value: 'multiple' },
+  { label: '无', value: 'none' }
+]
 
 // 变更即保存；失败回滚到改动前的值，并以服务端返回的生效值为准
 async function saveTaskSettings(body: UpdateConfigBody, okMessage: string) {
@@ -110,8 +129,11 @@ async function loadConfig() {
     // 仅当后端明确返回 true 才视为开启；undefined/null 一律按关闭（默认否），
     // 避免赋值为 undefined 导致 q-toggle 显示成"中间"态
     penetrateSubfolders.value = cfg.penetrate_subfolders === true
+    stripFolder.value = cfg.strip_folder === true
+    addFolderMode.value = (cfg.add_folder_mode as 'one' | 'multiple' | 'none') || 'none'
     maxConcurrentTasks.value = cfg.max_concurrent_tasks || 1
     compressionLevel.value = cfg.compression_level || 'normal'
+    skipCompressed.value = cfg.skip_compressed === true
   } catch (e) {
     $q.notify({ type: 'negative', message: (e as Error).message })
   }
@@ -133,6 +155,63 @@ async function savePenetrate(val: boolean) {
     $q.notify({ type: 'negative', message: (e as Error).message })
   } finally {
     savingPenetrate.value = false
+  }
+}
+
+async function saveStripFolder(val: boolean) {
+  if (savingStrip.value) return
+  const prev = stripFolder.value
+  savingStrip.value = true
+  try {
+    const cfg = await api.updateConfig({ strip_folder: val })
+    browseStore.setConfig(cfg)
+    stripFolder.value = cfg.strip_folder === true
+    $q.notify({
+      type: 'positive',
+      message: val ? '已开启去掉文件夹' : '已关闭去掉文件夹'
+    })
+  } catch (e) {
+    stripFolder.value = prev
+    $q.notify({ type: 'negative', message: (e as Error).message })
+  } finally {
+    savingStrip.value = false
+  }
+}
+
+async function saveAddFolderMode(val: 'one' | 'multiple' | 'none') {
+  if (savingAddFolder.value) return
+  const prev = addFolderMode.value
+  savingAddFolder.value = true
+  try {
+    const cfg = await api.updateConfig({ add_folder_mode: val })
+    browseStore.setConfig(cfg)
+    addFolderMode.value = (cfg.add_folder_mode as 'one' | 'multiple' | 'none') || 'none'
+    $q.notify({ type: 'positive', message: '已保存智能添加文件夹设置' })
+  } catch (e) {
+    addFolderMode.value = prev
+    $q.notify({ type: 'negative', message: (e as Error).message })
+  } finally {
+    savingAddFolder.value = false
+  }
+}
+
+async function saveSkipCompressed(val: boolean) {
+  if (savingSkip.value) return
+  const prev = skipCompressed.value
+  savingSkip.value = true
+  try {
+    const cfg = await api.updateConfig({ skip_compressed: val })
+    browseStore.setConfig(cfg)
+    skipCompressed.value = cfg.skip_compressed === true
+    $q.notify({
+      type: 'positive',
+      message: val ? '已开启跳过已压缩文件' : '已关闭跳过已压缩文件'
+    })
+  } catch (e) {
+    skipCompressed.value = prev
+    $q.notify({ type: 'negative', message: (e as Error).message })
+  } finally {
+    savingSkip.value = false
   }
 }
 
@@ -430,6 +509,70 @@ onMounted(() => {
               :name="opt.value"
               :label="opt.label"
               :disable="savingTaskSettings"
+            />
+          </q-tabs>
+        </div>
+
+        <q-separator class="q-my-md" />
+
+        <div class="row items-center justify-between">
+          <div class="q-pr-lg">
+            <div class="text-subtitle1 text-weight-medium">去掉文件夹</div>
+            <div class="text-caption text-grey-7 q-mt-xs">
+              压缩文件夹时，开启后 zip 内不再保留选中的顶层文件夹这一层（条目为 a.txt / sub/b.txt）；关闭则保留（MyFolder/a.txt，与 PC 右键压缩一致）。仅影响此后开始的任务。
+            </div>
+          </div>
+          <q-toggle
+            v-model="stripFolder"
+            :disable="savingStrip"
+            color="primary"
+            @update:model-value="saveStripFolder"
+          />
+        </div>
+
+        <q-separator class="q-my-md" />
+
+        <div class="row items-center justify-between">
+          <div class="q-pr-lg">
+            <div class="text-subtitle1 text-weight-medium">跳过已压缩文件</div>
+            <div class="text-caption text-grey-7 q-mt-xs">
+              压缩时直接排除已压缩格式（zip / 7z / rar / jpg / mp4 / pdf 等），不写入压缩包，避免二次压缩（浪费 CPU 且常体积反增）。开启后若选中的文件全部为已压缩格式，任务会提示无可压缩内容。仅影响此后开始的任务。
+            </div>
+          </div>
+          <q-toggle
+            v-model="skipCompressed"
+            :disable="savingSkip"
+            color="primary"
+            @update:model-value="saveSkipCompressed"
+          />
+        </div>
+
+        <q-separator class="q-my-md" />
+
+        <div class="row items-center justify-between">
+          <div class="q-pr-lg">
+            <div class="text-subtitle1 text-weight-medium">智能添加文件夹</div>
+            <div class="text-caption text-grey-7 q-mt-xs">
+              解压时是否自动包一层以压缩包命名的父文件夹。「1个」：多个文件或单个文件都包（自动避免文件夹嵌套）；「多个」：仅多个文件包，单文件/单文件夹不包；「无」：始终不包。仅影响此后开始的任务。
+            </div>
+          </div>
+          <q-tabs
+            v-model="addFolderMode"
+            dense
+            no-caps
+            inline-label
+            active-color="primary"
+            indicator-color="primary"
+            align="left"
+            class="compression-tabs rounded-borders q-pa-xs"
+            @update:model-value="saveAddFolderMode"
+          >
+            <q-tab
+              v-for="opt in addFolderOptions"
+              :key="opt.value"
+              :name="opt.value"
+              :label="opt.label"
+              :disable="savingAddFolder"
             />
           </q-tabs>
         </div>

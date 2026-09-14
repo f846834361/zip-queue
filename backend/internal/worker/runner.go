@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -42,14 +43,59 @@ func loadCompressionLevel(db *gorm.DB) archive.Level {
 	return archive.ParseLevel(setting.Get(db, setting.KeyCompressionLevel))
 }
 
+// loadStripFolder 读取"去掉顶层文件夹"开关（任务开始时取一次，默认 false）。
+// 与压缩效率同样执行期读库，使页面改配置只影响之后开始的任务。
+func loadStripFolder(db *gorm.DB) bool {
+	v, err := strconv.ParseBool(setting.Get(db, setting.KeyStripFolder))
+	return err == nil && v
+}
+
+// loadAddFolderMode 读取"智能添加文件夹"模式（任务开始时取一次，未设置回落默认 1个）。
+// 与压缩效率同样执行期读库，使页面改配置只影响之后开始的任务。
+func loadAddFolderMode(db *gorm.DB) string {
+	v := setting.Get(db, setting.KeyAddFolderMode)
+	if !setting.ValidAddFolderMode(v) {
+		return setting.AddFolderNone
+	}
+	return v
+}
+
+// shouldWrapFolder 按"智能添加文件夹"模式，结合解压出的顶层条目决定要不要包一层父文件夹。
+//   - none：始终不包。
+//   - multiple（多个）：仅当顶层条目数 > 1 才包；单个文件或单个文件夹都不包（避免文件夹嵌套）。
+//   - one（1个）：多个条目必包；单个文件也包；仅当单个条目本身是文件夹时不包（避免套文件夹）。
+func shouldWrapFolder(mode string, entries []os.DirEntry) bool {
+	if mode == setting.AddFolderNone {
+		return false
+	}
+	if len(entries) > 1 {
+		return true
+	}
+	if len(entries) == 0 {
+		return false
+	}
+	if entries[0].IsDir() {
+		// 单个条目已是文件夹：包一层会变成文件夹套文件夹，故不包。
+		return false
+	}
+	// 单个文件：one 包、multiple 不包。
+	return mode == setting.AddFolderOne
+}
+
+// CancelChecker 供 Runner 判断某任务是否由用户主动取消（以区分服务中断重排）。
+type CancelChecker interface {
+	IsCancelled(taskID uint) bool
+}
+
 // Runner 执行单个任务（解压或压缩）的全部副作用：临时目录、进度落库、替换原文件、清理。
 type Runner struct {
 	db     *gorm.DB
 	limits archive.Limits
+	chk    CancelChecker
 }
 
-func NewRunner(db *gorm.DB, limits archive.Limits) *Runner {
-	return &Runner{db: db, limits: limits}
+func NewRunner(db *gorm.DB, limits archive.Limits, chk CancelChecker) *Runner {
+	return &Runner{db: db, limits: limits, chk: chk}
 }
 
 // Run 执行一个已处于 running 状态的任务。
@@ -87,12 +133,17 @@ func (r *Runner) runDecompress(ctx context.Context, task *model.Task) {
 	if base == "" {
 		base = "decompressed"
 	}
+	// target 是"加文件夹"时的父文件夹（以 zip 名命名），包文件夹时结果落在 dir/base。
 	target := filepath.Join(dir, base)
-	isGzipSingle := kind == archive.KindGzip
+	addMode := loadAddFolderMode(r.db)
 
-	if _, err := os.Stat(target); err == nil {
-		r.fail(task, classifyTargetExists(target, false))
-		return
+	// 目标冲突预检（在大量解压前快速失败）：加文件夹时检查 wrapper 目录；
+	// 不加文件夹时条目名需解压后才知道，冲突检查放到移动前。
+	if addMode != setting.AddFolderNone {
+		if _, err := os.Stat(target); err == nil {
+			r.fail(task, classifyTargetExists(target, false))
+			return
+		}
 	}
 
 	tempDir := filepath.Join(dir, fmt.Sprintf("%s%d", TempDirPrefix, task.ID))
@@ -101,6 +152,11 @@ func (r *Runner) runDecompress(ctx context.Context, task *model.Task) {
 
 	if err := archive.Extract(ctx, src, tempDir, loadPasswords(r.db), r.limits, r.progressFn(task)); err != nil {
 		if ctx.Err() != nil {
+			if r.chk != nil && r.chk.IsCancelled(task.ID) {
+				// 用户主动取消：清理临时文件并标记 cancelled（不重排）
+				r.finishCancelled(task)
+				return
+			}
 			// 服务停止/重启导致的中断：删除临时文件，可安全重做的补一条待执行任务
 			FinishInterrupted(r.db, task)
 			return
@@ -110,14 +166,36 @@ func (r *Runner) runDecompress(ctx context.Context, task *model.Task) {
 		return
 	}
 
-	if isGzipSingle {
-		inner := filepath.Join(tempDir, base)
-		if err := os.Rename(inner, target); err != nil {
-			_ = os.RemoveAll(tempDir)
-			r.fail(task, classifyMoveError(err))
-			return
+	// 解压完成：依据"智能添加文件夹"配置，决定是否把结果包一层父文件夹。
+	entries, err := os.ReadDir(tempDir)
+	if err != nil {
+		_ = os.RemoveAll(tempDir)
+		r.fail(task, classifyError(err))
+		return
+	}
+	if !shouldWrapFolder(addMode, entries) {
+		// 不加文件夹：把 tempDir 内顶层条目直接搬到 dir 下，并避免与已有条目冲突。
+		for _, e := range entries {
+			if _, err := os.Stat(filepath.Join(dir, e.Name())); err == nil {
+				_ = os.RemoveAll(tempDir)
+				r.fail(task, classifyTargetExists(filepath.Join(dir, e.Name()), false))
+				return
+			}
+		}
+		for _, e := range entries {
+			if err := os.Rename(filepath.Join(tempDir, e.Name()), filepath.Join(dir, e.Name())); err != nil {
+				_ = os.RemoveAll(tempDir)
+				r.fail(task, classifyMoveError(err))
+				return
+			}
 		}
 		_ = os.RemoveAll(tempDir)
+		// 记录最终落点供列表缓存增量更新：单条目回写其真实路径，多条目回写父目录。
+		finalTarget := dir
+		if len(entries) == 1 {
+			finalTarget = filepath.Join(dir, entries[0].Name())
+		}
+		r.updateTask(task.ID, map[string]interface{}{"target_path": finalTarget}, "写入最终目标路径")
 	} else {
 		if err := os.Rename(tempDir, target); err != nil {
 			_ = os.RemoveAll(tempDir)
@@ -158,13 +236,19 @@ func (r *Runner) runCompress(ctx context.Context, task *model.Task) {
 	_ = os.RemoveAll(tempZip)
 	r.setTempTarget(task, tempZip, target)
 
-	// 任务开始执行时取一次压缩效率档位（与密码同样执行期读库），并记录到任务，
-	// 使任务详情可回显"当时实际使用的效率"，即使之后在配置页改动也不受影响。
+	// 任务开始执行时取一次压缩效率档位与是否去顶层文件夹（与密码同样执行期读库），
+	// 并记录到任务，使任务详情可回显"当时实际使用的效率"，即使之后在配置页改动也不受影响。
 	level := loadCompressionLevel(r.db)
+	stripFolder := loadStripFolder(r.db)
 	r.updateTask(task.ID, map[string]interface{}{"compression_level": string(level)}, "写入压缩效率档位")
 
-	if err := archive.Compress(ctx, src, tempZip, level, r.progressFn(task)); err != nil {
+	if err := archive.Compress(ctx, src, tempZip, level, stripFolder, setting.SkipCompressed(r.db), r.progressFn(task)); err != nil {
 		if ctx.Err() != nil {
+			if r.chk != nil && r.chk.IsCancelled(task.ID) {
+				// 用户主动取消：清理临时文件并标记 cancelled（不重排）
+				r.finishCancelled(task)
+				return
+			}
 			// 服务停止/重启导致的中断：删除临时文件，可安全重做的补一条待执行任务
 			FinishInterrupted(r.db, task)
 			return
@@ -232,6 +316,20 @@ func (r *Runner) succeed(task *model.Task) {
 		"temp_path":        "",
 		"error":            "",
 	}, "写入成功状态")
+}
+
+// finishCancelled 收尾被用户取消的任务：清理临时文件（解压临时目录或临时压缩包）、
+// 标记 cancelled；不重排（用户主动取消，不应自动续做），源/目标文件均保留。
+func (r *Runner) finishCancelled(task *model.Task) {
+	if task.TempPath != "" {
+		_ = os.RemoveAll(task.TempPath)
+	}
+	r.updateTask(task.ID, map[string]interface{}{
+		"status":       model.StatusCancelled,
+		"completed_at": time.Now(),
+		"temp_path":    "",
+		"error":        "任务已被用户取消",
+	}, "写入取消状态")
 }
 
 // updateTask 写入任务字段，失败时重试一次并记录日志。
