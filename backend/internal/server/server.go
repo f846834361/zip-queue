@@ -3,9 +3,11 @@ package server
 import (
 	"context"
 	"fmt"
+	"log"
 	"mime"
 	"net/http"
 	"path"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -22,7 +24,7 @@ import (
 func Run(ctx context.Context, cfg *config.Config, gdb *gorm.DB, pool *worker.Pool) error {
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
-	r.Use(gin.Logger(), gin.Recovery())
+	r.Use(gin.Logger(), recoveryWithLog())
 	api.Register(r.Group("/api"), gdb, pool, cfg)
 	r.NoRoute(serveSPA)
 
@@ -46,6 +48,21 @@ func Run(ctx context.Context, cfg *config.Config, gdb *gorm.DB, pool *worker.Poo
 		return err
 	}
 	return nil
+}
+
+// recoveryWithLog 捕获 HTTP handler 中的 panic：把堆栈记录到标准 log 并返回 500，
+// 避免单个请求的 panic 拖垮整个进程；与 worker 协程的 recover 共用同一日志出口。
+// （替换 gin.Recovery() 是因为后者默认把堆栈写到 os.Stdout，不是应用统一日志。）
+func recoveryWithLog() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		defer func() {
+			if err := recover(); err != nil {
+				log.Printf("[PANIC] %s %s: %v\n%s", c.Request.Method, c.Request.URL.Path, err, debug.Stack())
+				c.AbortWithStatus(http.StatusInternalServerError)
+			}
+		}()
+		c.Next()
+	}
 }
 
 // serveSPA 提供嵌入的前端静态资源；未命中则回退到 index.html（SPA 路由）。

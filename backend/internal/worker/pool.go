@@ -3,7 +3,9 @@ package worker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -227,14 +229,21 @@ func (p *Pool) dispatch(ctx context.Context) {
 
 		p.wg.Add(1)
 		go func(t model.Task) {
-			taskCtx, cancel := context.WithCancel(ctx)
-			p.registerCancel(t.ID, cancel)
 			defer func() {
+				if r := recover(); r != nil {
+					// worker 协程内的 panic 不会被 gin.Recovery 捕获，会直接拖垮进程；
+					// 这里兜底捕获、把堆栈落到标准日志，并把任务标记为失败，
+					// 同时照常归还并发槽，避免该任务永久卡在 running 占用槽位。
+					log.Printf("[PANIC] 任务 #%d 执行异常崩溃：%v\n%s", t.ID, r, debug.Stack())
+					p.runner.fail(&t, fmt.Sprintf("任务执行异常崩溃：%v", r))
+				}
 				p.unregisterCancel(t.ID)
 				p.release()
 				p.wg.Done()
 				p.Enqueue()
 			}()
+			taskCtx, cancel := context.WithCancel(ctx)
+			p.registerCancel(t.ID, cancel)
 			p.runner.Run(taskCtx, &t)
 		}(task)
 	}
