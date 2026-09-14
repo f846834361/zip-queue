@@ -35,6 +35,8 @@ type updateConfigRequest struct {
 	PenetrateSubfolders *bool   `json:"penetrate_subfolders"`
 	MaxConcurrentTasks  *int    `json:"max_concurrent_tasks"`
 	CompressionLevel    *string `json:"compression_level"`
+	StripFolder         *bool   `json:"strip_folder"`
+	AddFolderMode       *string `json:"add_folder_mode"`
 }
 
 // UpdateConfig 更新可在配置页修改的运行期配置项。
@@ -56,6 +58,10 @@ func (a *API) UpdateConfig(c *gin.Context) {
 		c.JSON(400, gin.H{"error": "压缩效率取值非法：" + *req.CompressionLevel})
 		return
 	}
+	if req.AddFolderMode != nil && !setting.ValidAddFolderMode(*req.AddFolderMode) {
+		c.JSON(400, gin.H{"error": "智能添加文件夹取值非法：" + *req.AddFolderMode})
+		return
+	}
 
 	if req.PenetrateSubfolders != nil {
 		if err := setting.Set(a.db, setting.KeyPenetrateSubfolders, strconv.FormatBool(*req.PenetrateSubfolders)); err != nil {
@@ -73,6 +79,18 @@ func (a *API) UpdateConfig(c *gin.Context) {
 	}
 	if req.CompressionLevel != nil {
 		if err := setting.Set(a.db, setting.KeyCompressionLevel, *req.CompressionLevel); err != nil {
+			c.JSON(500, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	if req.StripFolder != nil {
+		if err := setting.Set(a.db, setting.KeyStripFolder, strconv.FormatBool(*req.StripFolder)); err != nil {
+			c.JSON(500, gin.H{"error": err.Error()})
+			return
+		}
+	}
+	if req.AddFolderMode != nil {
+		if err := setting.Set(a.db, setting.KeyAddFolderMode, *req.AddFolderMode); err != nil {
 			c.JSON(500, gin.H{"error": err.Error()})
 			return
 		}

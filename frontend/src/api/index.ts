@@ -69,6 +69,10 @@ export interface AppConfig {
   max_concurrent_tasks: number
   default_browse_path: string
   penetrate_subfolders: boolean
+  /** 压缩时是否去掉顶层文件夹：true 则 zip 内不保留选中文件夹这一层（修复前逻辑）；false 保留（当前默认逻辑）。 */
+  strip_folder?: boolean
+  /** 解压"智能添加文件夹"模式：one=1个 / multiple=多个 / none=无 */
+  add_folder_mode?: 'one' | 'multiple' | 'none'
   /** 压缩效率：fastest 特快（仅打包）/ fast 快 / normal 中 / slow 慢 */
   compression_level: 'fastest' | 'fast' | 'normal' | 'slow'
 }
@@ -78,6 +82,8 @@ export interface UpdateConfigBody {
   penetrate_subfolders?: boolean
   max_concurrent_tasks?: number
   compression_level?: AppConfig['compression_level']
+  strip_folder?: boolean
+  add_folder_mode?: AppConfig['add_folder_mode']
 }
 
 export interface BulkResponse {
