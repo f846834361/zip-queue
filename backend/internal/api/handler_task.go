@@ -222,6 +222,7 @@ func (a *API) BulkDecompress(c *gin.Context) {
 	if req.Recursive != nil {
 		recursive = *req.Recursive
 	}
+	seenSplit := map[string]bool{}
 	var archives []string
 	err = filepath.WalkDir(req.Path, func(p string, d fs.DirEntry, werr error) error {
 		if werr != nil {
@@ -238,6 +239,15 @@ func (a *API) BulkDecompress(c *gin.Context) {
 			return nil
 		}
 		if archive.IsSupportedArchive(p) {
+			// 分卷集去重：同一分卷集（任意卷入口）只建一条任务，避免批量解压一次性生成 N 条失败任务。
+			// 手动多选不同分卷仍会生成多条任务，由 runner 的分卷集互斥锁仲裁。
+			if _, logicalName, isSplit, derr := archive.EnumerateVolumes(p); derr == nil && isSplit {
+				key := filepath.Join(filepath.Dir(p), logicalName)
+				if seenSplit[key] {
+					return nil
+				}
+				seenSplit[key] = true
+			}
 			archives = append(archives, p)
 		}
 		return nil

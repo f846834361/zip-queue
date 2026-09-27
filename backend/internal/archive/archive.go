@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -25,17 +26,63 @@ const (
 // ArchiveExtensions 是批量扫描时识别的扩展名集合（按长后缀优先）。
 var ArchiveExtensions = []string{".tar.gz", ".tgz", ".tar", ".zip", ".gz"}
 
-// Detect 依据扩展名判定压缩包类型。
+// splitVolumeInfo 若文件名是分卷（PKWARE 的 name.zNN 或 7-Zip 的 name.zip.NNN），
+// 返回逻辑基名 base（保留原大小写）、卷序号 idx、类型 kind（"pkware"/"7z"）与 ok=true。
+// 非分卷返回 ok=false。
+func splitVolumeInfo(name string) (base string, idx int, kind string, ok bool) {
+	lower := strings.ToLower(name)
+	// 7-Zip 风格：<base>.zip.NNN（末卷不带 .zip）
+	if i := strings.LastIndex(lower, ".zip."); i >= 0 {
+		num := lower[i+5:]
+		if num != "" && isAllDigits(num) {
+			if n, err := strconv.Atoi(num); err == nil {
+				// base 为去掉末段 .NNN 的归档名（保留 .zip，如 name.zip）
+				return name[:i+4], n, "7z", true
+			}
+		}
+	}
+	// PKWARE 风格：<base>.zNN（LastIndex 命中 .zip. 中的 .z 时其后非纯数字，自然排除）
+	if i := strings.LastIndex(lower, ".z"); i >= 0 {
+		num := lower[i+2:]
+		if num != "" && isAllDigits(num) {
+			if n, err := strconv.Atoi(num); err == nil {
+				return name[:i], n, "pkware", true
+			}
+		}
+	}
+	return "", 0, "", false
+}
+
+// isAllDigits 判断字符串是否全为数字且非空。
+func isAllDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// Detect 依据扩展名判定压缩包类型。除单文件 .zip 外，亦识别两种分卷入口：
+// PKWARE 分卷（name.z01 …, 末卷 name.zip）与 7-Zip 分卷（name.zip.001 …）。
+// 任意一卷入口都返回 KindZip，使前端可任选一卷发起解压。
 func Detect(path string) Kind {
-	name := strings.ToLower(filepath.Base(path))
-	switch {
-	case strings.HasSuffix(name, ".zip"):
+	name := filepath.Base(path)
+	if _, _, _, ok := splitVolumeInfo(name); ok {
 		return KindZip
-	case strings.HasSuffix(name, ".tar.gz"), strings.HasSuffix(name, ".tgz"):
+	}
+	lower := strings.ToLower(name)
+	switch {
+	case strings.HasSuffix(lower, ".zip"):
+		return KindZip
+	case strings.HasSuffix(lower, ".tar.gz"), strings.HasSuffix(lower, ".tgz"):
 		return KindTarGz
-	case strings.HasSuffix(name, ".tar"):
+	case strings.HasSuffix(lower, ".tar"):
 		return KindTar
-	case strings.HasSuffix(name, ".gz"):
+	case strings.HasSuffix(lower, ".gz"):
 		return KindGzip
 	}
 	return KindUnknown
