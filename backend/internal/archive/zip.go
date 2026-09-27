@@ -18,16 +18,12 @@ import (
 // ErrPasswordRequired 当 zip 加密但无匹配密码时返回。
 var ErrPasswordRequired = fmt.Errorf("zip is encrypted but no matching password found")
 
-// extractZip 解压 zip 到 targetDir，应用智能合并；支持加密 zip（按密码列表顺序尝试）。
-func extractZip(ctx context.Context, src, targetDir string, passwords []string, limits Limits, p ProgressFn) error {
+// extractZip 从已打开的 *zip.Reader 解压（单文件与分卷共用；分卷由调用方拼接后传入）。
+// 应用智能合并；支持加密 zip（按密码列表顺序尝试）。
+func extractZip(ctx context.Context, zr *zip.Reader, totalSize int64, targetDir string, passwords []string, limits Limits, p ProgressFn) error {
 	if err := os.MkdirAll(targetDir, 0o755); err != nil {
 		return fmt.Errorf("mkdir target: %w", err)
 	}
-	zr, closer, totalSize, err := openZipArchive(src)
-	if err != nil {
-		return fmt.Errorf("open zip: %w", err)
-	}
-	defer closer.Close()
 
 	// 探测是否有加密条目，若有则按顺序轮询密码（UTF-8 失败回退 GBK）
 	password := ""
@@ -191,6 +187,7 @@ func tryPasswords(zr *zip.Reader, passwords []string) (string, bool, error) {
 // 逻辑名、是否为分卷。逻辑名用于推导解压目标文件夹名与运行锁 key；任一分卷缺失或不连续时返回错误。
 //   - PKWARE：base.z01, base.z02, …, base.zip（末卷为 .zip）
 //   - 7-Zip ：base.zip.001, base.zip.002, …, base.zip.NNN（末卷不带 .zip）
+//
 // 入口可以是任意一卷：由后缀反推逻辑基名 base，再扫描同目录相邻分卷还原全套。
 func EnumerateVolumes(src string) (vols []string, logicalName string, isSplit bool, err error) {
 	dir := filepath.Dir(src)
@@ -214,12 +211,13 @@ func EnumerateVolumes(src string) (vols []string, logicalName string, isSplit bo
 
 // enumerateSplit 收集某一分卷集的全部卷（按序号升序），并校验连续性，缺口即报错。
 func enumerateSplit(dir, base, kind string) (vols []string, logicalName string, isSplit bool, err error) {
-	if kind == "7z" {
-		matches, _ := filepath.Glob(filepath.Join(dir, base+".*"))
+	if kind == "pkware" {
+		// PKWARE：base.z01 … base.z(N) + 末卷 base.zip
+		matches, _ := filepath.Glob(filepath.Join(dir, base+".z*"))
 		idx := map[int]string{}
 		maxIdx := 0
 		for _, m := range matches {
-			suf := strings.TrimPrefix(filepath.Base(m), base+".")
+			suf := strings.TrimPrefix(filepath.Base(m), base+".z")
 			if !isAllDigits(suf) {
 				continue
 			}
@@ -229,26 +227,31 @@ func enumerateSplit(dir, base, kind string) (vols []string, logicalName string, 
 				maxIdx = n
 			}
 		}
+		last := filepath.Join(dir, base+".zip")
+		if _, serr := os.Stat(last); serr != nil {
+			return nil, "", true, fmt.Errorf("分卷缺失：%s", last)
+		}
 		if maxIdx == 0 {
-			return nil, "", true, fmt.Errorf("分卷缺失：%s", filepath.Join(dir, base+".001"))
+			return nil, "", true, fmt.Errorf("分卷缺失：%s", filepath.Join(dir, base+".z01"))
 		}
 		for n := 1; n <= maxIdx; n++ {
 			if _, ok := idx[n]; !ok {
-				return nil, "", true, fmt.Errorf("分卷缺失：%s", filepath.Join(dir, fmt.Sprintf("%s.%03d", base, n)))
+				return nil, "", true, fmt.Errorf("分卷缺失：%s", filepath.Join(dir, fmt.Sprintf("%s.z%02d", base, n)))
 			}
 		}
-		vols = make([]string, 0, maxIdx)
+		vols = make([]string, 0, maxIdx+1)
 		for n := 1; n <= maxIdx; n++ {
 			vols = append(vols, idx[n])
 		}
+		vols = append(vols, last)
 		return vols, base, true, nil
 	}
-	// PKWARE：base.z01 … base.z(N) + 末卷 base.zip
-	matches, _ := filepath.Glob(filepath.Join(dir, base+".z*"))
+	// 通用 / 容器分卷：base.<digits>（如 name.zip.001、name.7z.001、name.001）
+	matches, _ := filepath.Glob(filepath.Join(dir, base+".*"))
 	idx := map[int]string{}
 	maxIdx := 0
 	for _, m := range matches {
-		suf := strings.TrimPrefix(filepath.Base(m), base+".z")
+		suf := strings.TrimPrefix(filepath.Base(m), base+".")
 		if !isAllDigits(suf) {
 			continue
 		}
@@ -258,54 +261,93 @@ func enumerateSplit(dir, base, kind string) (vols []string, logicalName string, 
 			maxIdx = n
 		}
 	}
-	last := filepath.Join(dir, base+".zip")
-	if _, serr := os.Stat(last); serr != nil {
-		return nil, "", true, fmt.Errorf("分卷缺失：%s", last)
-	}
 	if maxIdx == 0 {
-		return nil, "", true, fmt.Errorf("分卷缺失：%s", filepath.Join(dir, base+".z01"))
+		return nil, "", true, fmt.Errorf("分卷缺失：%s", filepath.Join(dir, base+".001"))
 	}
 	for n := 1; n <= maxIdx; n++ {
 		if _, ok := idx[n]; !ok {
-			return nil, "", true, fmt.Errorf("分卷缺失：%s", filepath.Join(dir, fmt.Sprintf("%s.z%02d", base, n)))
+			return nil, "", true, fmt.Errorf("分卷缺失：%s", filepath.Join(dir, fmt.Sprintf("%s.%03d", base, n)))
 		}
 	}
-	vols = make([]string, 0, maxIdx+1)
+	vols = make([]string, 0, maxIdx)
 	for n := 1; n <= maxIdx; n++ {
 		vols = append(vols, idx[n])
 	}
-	vols = append(vols, last)
 	return vols, base, true, nil
 }
 
-// openZipArchive 打开 zip（单文件或分卷），返回 *zip.Reader、关闭函数与总字节数。
-// 分卷通过 splitReaderAt 跨多个卷文件零拷贝拼接，无需复制成临时大文件。
-func openZipArchive(src string) (*zip.Reader, io.Closer, int64, error) {
+// extractZipPath 单文件 .zip（非分卷）入口：打开后委托 extractZip。
+func extractZipPath(ctx context.Context, src, targetDir string, passwords []string, limits Limits, p ProgressFn) error {
+	rc, err := zip.OpenReader(src)
+	if err != nil {
+		return fmt.Errorf("open zip: %w", err)
+	}
+	defer rc.Close()
+	var sz int64
+	if fi, serr := os.Stat(src); serr == nil {
+		sz = fi.Size()
+	}
+	return extractZip(ctx, &rc.Reader, sz, targetDir, passwords, limits, p)
+}
+
+// openRaw 打开归档（单文件或分卷），返回可随机读接口、总字节数与关闭函数。
+// 分卷通过 splitReaderAt 跨多文件零拷贝拼接；单文件直接以 *os.File 作为 ReaderAt。
+func openRaw(src string) (io.ReaderAt, int64, io.Closer, error) {
 	vols, _, isSplit, err := EnumerateVolumes(src)
 	if err != nil {
-		return nil, nil, 0, err
+		return nil, 0, nil, err
 	}
 	if !isSplit {
-		rc, err := zip.OpenReader(src)
+		f, err := os.Open(src)
 		if err != nil {
-			return nil, nil, 0, err
+			return nil, 0, nil, err
 		}
-		var sz int64
-		if fi, serr := os.Stat(src); serr == nil {
-			sz = fi.Size()
+		fi, err := f.Stat()
+		if err != nil {
+			f.Close()
+			return nil, 0, nil, err
 		}
-		return &rc.Reader, rc, sz, nil
+		return f, fi.Size(), f, nil
 	}
-	ra, total, closer, err := newSplitReaderAt(vols)
+	return newSplitReaderAt(vols)
+}
+
+// extractSniff 打开归档（必要时拼接分卷）后读取头部魔数，按格式路由到对应解压器。
+// 这样分卷与单文件、zip 与 7z 都能用同一入口，且识别不依赖文件扩展名。
+func extractSniff(ctx context.Context, src, targetDir string, passwords []string, limits Limits, p ProgressFn) error {
+	ra, total, closer, err := openRaw(src)
 	if err != nil {
-		return nil, nil, 0, err
+		return fmt.Errorf("open archive: %w", err)
 	}
-	zr, err := zip.NewReader(ra, total)
-	if err != nil {
-		_ = closer.Close()
-		return nil, nil, 0, err
+	defer closer.Close()
+	buf := make([]byte, 8)
+	if n, e := ra.ReadAt(buf, 0); n == 0 && e != nil {
+		return fmt.Errorf("read header: %w", e)
 	}
-	return zr, closer, total, nil
+	switch {
+	case isZipMagic(buf):
+		zr, e := zip.NewReader(ra, total)
+		if e != nil {
+			return fmt.Errorf("open zip: %w", e)
+		}
+		return extractZip(ctx, zr, total, targetDir, passwords, limits, p)
+	case is7zMagic(buf):
+		return extract7z(ctx, ra, total, targetDir, passwords, limits, p)
+	default:
+		return ErrUnsupportedFormat
+	}
+}
+
+// isZipMagic 判断是否为 ZIP 本地文件头 / 中央目录尾（PK\x03\x04 / PK\x05\x06）。
+func isZipMagic(b []byte) bool {
+	return len(b) >= 4 && b[0] == 'P' && b[1] == 'K' &&
+		(b[2] == 0x03 || b[2] == 0x05) && (b[3] == 0x04 || b[3] == 0x06)
+}
+
+// is7zMagic 判断是否为 7z 签名（7z¼¯'）。
+func is7zMagic(b []byte) bool {
+	return len(b) >= 6 && b[0] == '7' && b[1] == 'z' &&
+		b[2] == 0xBC && b[3] == 0xAF && b[4] == 0x27 && b[5] == 0x1C
 }
 
 // splitReaderAt 实现 io.ReaderAt，跨多个分卷文件按拼接偏移随机寻址读取，

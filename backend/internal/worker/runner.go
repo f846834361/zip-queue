@@ -127,7 +127,7 @@ func (r *Runner) runDecompress(ctx context.Context, task *model.Task) {
 		return
 	}
 
-	if archive.Detect(src) == archive.KindUnknown {
+	if !archive.IsSupportedArchive(src) {
 		r.fail(task, classifyError(archive.ErrUnsupportedFormat))
 		return
 	}
@@ -138,7 +138,11 @@ func (r *Runner) runDecompress(ctx context.Context, task *model.Task) {
 		r.fail(task, classifyError(verr))
 		return
 	}
-	base := logicalName
+	// 目标文件夹名取逻辑基名（剥掉 .zip/.7z 等容器扩展名），与单文件归档保持一致。
+	base := archive.StripArchiveExt(logicalName)
+	if base == "" {
+		base = logicalName
+	}
 	if base == "" {
 		base = "decompressed"
 	}

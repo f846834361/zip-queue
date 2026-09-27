@@ -20,8 +20,6 @@ const retrying = ref(false)
 // 本页只允许重试一次（刷新或重新进入页面后重置），避免重复点击创建多条重复任务
 const retried = ref(false)
 
-const pollIntervalText = `每 ${POLL_INTERVAL / 1000} 秒更新`
-
 const taskId = computed(() => Number(props.id ?? route.params.id))
 const isRunning = computed(() => task.value?.status === 'running')
 const isPending = computed(() => task.value?.status === 'pending')
@@ -275,13 +273,6 @@ onMounted(loadInitial)
               <template v-else>
                 {{ formatSize(task.processed_bytes) }}{{ task.status === 'running' ? '（估算中）' : '' }}
               </template>
-            </q-item-section>
-          </q-item>
-          <q-item v-if="task.status === 'running'">
-            <q-item-section side>自动刷新</q-item-section>
-            <q-item-section>
-              <q-spinner-dots color="primary" size="sm" class="q-mr-sm" />
-              <span class="text-caption text-grey-7">{{ pollIntervalText }}</span>
             </q-item-section>
           </q-item>
         </q-list>

@@ -147,6 +147,7 @@ func (a *API) CreateTasksBatch(c *gin.Context) {
 	// 不展开到其子项（不穿透）。不勾选时的批量压缩才由配置的穿透开关决定。
 	paths := req.Paths
 	seen := make(map[string]struct{}, len(paths))
+	splitSeen := make(map[string]struct{}, len(paths))
 	tasks := make([]model.Task, 0, len(paths))
 	skipped := 0
 	for _, p := range paths {
@@ -159,6 +160,17 @@ func (a *API) CreateTasksBatch(c *gin.Context) {
 			continue
 		}
 		seen[p] = struct{}{}
+		if req.Type == model.TypeDecompress {
+			// 分卷集去重：同一分卷集（任意卷入口）只建一条任务，避免勾选多个分卷生成多条任务后互相失败。
+			// 纯后缀识别，不查询文件系统（与前端口径一致）。
+			if key, isSplit := archive.SplitSetKey(p); isSplit {
+				if _, sdup := splitSeen[key]; sdup {
+					skipped++
+					continue
+				}
+				splitSeen[key] = struct{}{}
+			}
+		}
 		t, _ := taskForPath(req.Type, p)
 		if t == nil {
 			skipped++
