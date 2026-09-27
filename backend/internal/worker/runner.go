@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -92,10 +93,13 @@ type Runner struct {
 	db     *gorm.DB
 	limits archive.Limits
 	chk    CancelChecker
+	// 分卷集互斥：key 为 dir+逻辑名，标记正在解压的分卷集，避免同一分卷集的多个任务并发执行。
+	splitMu     sync.Mutex
+	activeSplit map[string]bool
 }
 
 func NewRunner(db *gorm.DB, limits archive.Limits, chk CancelChecker) *Runner {
-	return &Runner{db: db, limits: limits, chk: chk}
+	return &Runner{db: db, limits: limits, chk: chk, activeSplit: make(map[string]bool)}
 }
 
 // Run 执行一个已处于 running 状态的任务。
@@ -123,18 +127,45 @@ func (r *Runner) runDecompress(ctx context.Context, task *model.Task) {
 		return
 	}
 
-	kind := archive.Detect(src)
-	if kind == archive.KindUnknown {
+	if !archive.IsSupportedArchive(src) {
 		r.fail(task, classifyError(archive.ErrUnsupportedFormat))
 		return
 	}
 	dir := filepath.Dir(src)
-	base := archive.StripArchiveExt(filepath.Base(src))
+	// 枚举分卷：任意分卷入口都能定位全套；缺失/不连续会在此报错。
+	vols, logicalName, isSplit, verr := archive.EnumerateVolumes(src)
+	if verr != nil {
+		r.fail(task, classifyError(verr))
+		return
+	}
+	// 目标文件夹名取逻辑基名（剥掉 .zip/.7z 等容器扩展名），与单文件归档保持一致。
+	base := archive.StripArchiveExt(logicalName)
+	if base == "" {
+		base = logicalName
+	}
 	if base == "" {
 		base = "decompressed"
 	}
-	// target 是"加文件夹"时的父文件夹（以 zip 名命名），包文件夹时结果落在 dir/base。
+	// target 是"加文件夹"时的父文件夹（以 zip 逻辑名命名），包文件夹时结果落在 dir/base。
 	target := filepath.Join(dir, base)
+
+	// 分卷集互斥：同一分卷集（不同卷入口）并发解压时只允许一个，其余直接失败让出槽位。
+	if isSplit {
+		splitKey := filepath.Join(dir, logicalName)
+		r.splitMu.Lock()
+		if r.activeSplit[splitKey] {
+			r.splitMu.Unlock()
+			r.fail(task, fmt.Sprintf("分卷 %s 正在被其他任务解压，已跳过", logicalName))
+			return
+		}
+		r.activeSplit[splitKey] = true
+		r.splitMu.Unlock()
+		defer func() {
+			r.splitMu.Lock()
+			delete(r.activeSplit, splitKey)
+			r.splitMu.Unlock()
+		}()
+	}
 	addMode := loadAddFolderMode(r.db)
 
 	// 目标冲突预检（在大量解压前快速失败）：加文件夹时检查 wrapper 目录；
@@ -204,8 +235,15 @@ func (r *Runner) runDecompress(ctx context.Context, task *model.Task) {
 		}
 	}
 
-	if err := os.Remove(src); err != nil {
-		r.fail(task, classifyDeleteError(err, model.TypeDecompress))
+	// 解压成功后删除全部分卷（分卷集所有卷；单文件解压时 vols 仅含源路径）
+	var delErr error
+	for _, v := range vols {
+		if e := os.RemoveAll(v); e != nil {
+			delErr = e
+		}
+	}
+	if delErr != nil {
+		r.fail(task, classifyDeleteError(delErr, model.TypeDecompress))
 		return
 	}
 	r.succeed(task)
@@ -304,11 +342,16 @@ func (r *Runner) fail(task *model.Task, msg string) {
 }
 
 func (r *Runner) succeed(task *model.Task) {
-	// 任务成功后对源目录的列表缓存做精确增量更新（删 SourcePath、加 TargetPath），
-	// 而非整条失效：解压删源压缩包加解压目录、压缩删源加 .zip，delta 完全一致。
+	// 任务成功后对源目录的列表缓存做精确增量更新（删源、加目标），而非整条失效：
+	// 解压删源压缩包加解压目录、压缩删源加 .zip，delta 完全一致。分卷解压时"删源"需移除
+	// 全部分卷，故此处用 EnumerateVolumes 取全部分卷作为删除项；单文件/压缩时仅为源路径。
 	// 这样对含大量文件的目录在频繁任务下不会反复触发昂贵的全量重列，缓存始终温热；
 	// 外部/手动改动仍由 ListCached 的 mtime 守卫兜底失效。
-	fs.UpdateListCache(filepath.Dir(task.SourcePath), task.SourcePath, task.TargetPath)
+	removed := []string{task.SourcePath}
+	if vols, _, isSplit, verr := archive.EnumerateVolumes(task.SourcePath); verr == nil && isSplit {
+		removed = vols
+	}
+	fs.UpdateListCache(filepath.Dir(task.SourcePath), task.TargetPath, removed...)
 	r.updateTask(task.ID, map[string]interface{}{
 		"status":           model.StatusSucceeded,
 		"progress_percent": 100,

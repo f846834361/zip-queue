@@ -71,7 +71,7 @@ func InvalidateListCache(path string) {
 // 若目录未被浏览过（无未过期缓存项），则什么都不做：只为真正在用的缓存做维护，
 // 不会主动为未浏览目录构建缓存。若新增项无法 Lstat（极端情况），退化为整条失效，
 // 由下次访问重建，保证安全。外部/手动的文件改动仍由 ListCached 的 mtime 守卫兜底。
-func UpdateListCache(path, removedPath, addedPath string) {
+func UpdateListCache(path, addedPath string, removedPaths ...string) {
 	listCacheMu.Lock()
 	defer listCacheMu.Unlock()
 	c, ok := listCache[path]
@@ -83,10 +83,18 @@ func UpdateListCache(path, removedPath, addedPath string) {
 		delete(listCache, path)
 		return
 	}
+	skip := func(p string) bool {
+		for _, rp := range removedPaths {
+			if p == rp {
+				return true
+			}
+		}
+		return false
+	}
 	// 写时复制：构建全新切片，不改动旧的，保证并发读取安全。
 	out := make([]Entry, 0, len(c.entries)+1)
 	for _, e := range c.entries {
-		if e.Path == removedPath {
+		if skip(e.Path) {
 			continue
 		}
 		out = append(out, e)

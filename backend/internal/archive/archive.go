@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -20,30 +21,123 @@ const (
 	KindTar
 	KindTarGz
 	KindGzip
+	KindSevenZip
 )
 
 // ArchiveExtensions 是批量扫描时识别的扩展名集合（按长后缀优先）。
-var ArchiveExtensions = []string{".tar.gz", ".tgz", ".tar", ".zip", ".gz"}
+var ArchiveExtensions = []string{".tar.gz", ".tgz", ".tar", ".zip", ".7z", ".gz"}
 
-// Detect 依据扩展名判定压缩包类型。
+// splitVolumeInfo 识别分卷文件名，返回逻辑基名 base、卷序号 idx、类型 kind 与 ok。
+// 不依赖具体归档格式（格式由解压时的魔数嗅探决定），支持：
+//   - 容器扩展名分卷：base.<ext>.NNN（ext ∈ 已知容器扩展名，如 zip/7z/rar/tar），
+//     例：name.zip.001、name.7z.001、name.rar.001；
+//   - PKWARE 分卷：base.zNN（末卷为 base.zip）；
+//   - 通用数字分卷：base.NNN（无容器扩展名，如 split 切分出的 name.001）。
+//
+// 数字段长度需 ≥ 2 以过滤 file.1 这类非分卷。非分卷返回 ok=false。
+func splitVolumeInfo(name string) (base string, idx int, kind string, ok bool) {
+	lower := strings.ToLower(name)
+	// 容器扩展名 + 数字分卷：base.<ext>.NNN
+	if dot := strings.LastIndex(lower, "."); dot > 0 && dot < len(lower)-1 {
+		suf := lower[dot+1:]
+		if isAllDigits(suf) && len(suf) >= 2 {
+			pre := lower[:dot] // base.<ext>
+			if d2 := strings.LastIndex(pre, "."); d2 >= 0 {
+				if isKnownContainerExt(pre[d2+1:]) {
+					n, _ := strconv.Atoi(suf)
+					return name[:d2] + "." + name[d2+1:dot], n, "split", true
+				}
+			}
+			// 通用数字分卷：base.NNN（无容器扩展名）
+			n, _ := strconv.Atoi(suf)
+			return name[:dot], n, "split", true
+		}
+	}
+	// PKWARE 分卷：base.zNN
+	if i := strings.LastIndex(lower, ".z"); i >= 0 {
+		num := lower[i+2:]
+		if num != "" && isAllDigits(num) && len(num) >= 2 {
+			n, _ := strconv.Atoi(num)
+			return name[:i], n, "pkware", true
+		}
+	}
+	return "", 0, "", false
+}
+
+// isKnownContainerExt 判断扩展名是否为已知归档容器（用于容器扩展名分卷识别）。
+func isKnownContainerExt(ext string) bool {
+	switch ext {
+	case "zip", "7z", "rar", "tar", "tgz", "gz", "bz2", "xz", "lz4", "zst", "tar.gz":
+		return true
+	}
+	return false
+}
+
+// isAllDigits 判断字符串是否全为数字且非空。
+func isAllDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// Detect 依据扩展名判定单文件压缩包类型（分卷不在此判定，交由 IsSupportedArchive）。
 func Detect(path string) Kind {
-	name := strings.ToLower(filepath.Base(path))
+	name := filepath.Base(path)
+	lower := strings.ToLower(name)
 	switch {
-	case strings.HasSuffix(name, ".zip"):
+	case strings.HasSuffix(lower, ".7z"):
+		return KindSevenZip
+	case strings.HasSuffix(lower, ".zip"):
 		return KindZip
-	case strings.HasSuffix(name, ".tar.gz"), strings.HasSuffix(name, ".tgz"):
+	case strings.HasSuffix(lower, ".tar.gz"), strings.HasSuffix(lower, ".tgz"):
 		return KindTarGz
-	case strings.HasSuffix(name, ".tar"):
+	case strings.HasSuffix(lower, ".tar"):
 		return KindTar
-	case strings.HasSuffix(name, ".gz"):
+	case strings.HasSuffix(lower, ".gz"):
 		return KindGzip
 	}
 	return KindUnknown
 }
 
-// IsSupportedArchive 判断给定路径是否为受支持的压缩包。
+// IsSupportedArchive 判断给定路径是否为受支持的压缩包（单文件或分卷入口）。
+// 分卷入口（任意卷）也返回 true，使前端可任选一卷发起解压。
 func IsSupportedArchive(path string) bool {
-	return Detect(path) != KindUnknown
+	if Detect(path) != KindUnknown {
+		return true
+	}
+	if _, _, _, ok := splitVolumeInfo(filepath.Base(path)); ok {
+		return true
+	}
+	return false
+}
+
+// SplitSetKey 返回路径所属分卷集的去重 key（目录 + 逻辑基名），用于创建任务阶段对
+// 同一分卷集（任意卷入口）去重，避免勾选多个分卷生成多条任务后互相失败。
+// 仅按后缀识别、不查询文件系统（与前端“后缀名匹配”口径一致、零开销）：
+//   - PKWARE 卷 name.zNN / 7-Zip 卷 name.zip.NNN：由 splitVolumeInfo 取基名；
+//   - 普通单文件 .zip 也按基名纳入 key，从而与 PKWARE 末卷 name.zip 自然合并，
+//     又不会误伤其它不同名的 .zip（基名不同则 key 不同）。
+//
+// 非归档类（文件夹 / 其它后缀）返回 ("", false)。
+func SplitSetKey(path string) (string, bool) {
+	dir := filepath.Dir(path)
+	name := filepath.Base(path)
+	if base, _, _, ok := splitVolumeInfo(name); ok {
+		return filepath.Join(dir, base), true
+	}
+	lower := strings.ToLower(name)
+	if strings.HasSuffix(lower, ".zip") {
+		if b := strings.TrimSuffix(name, ".zip"); b != "" {
+			return filepath.Join(dir, b), true
+		}
+	}
+	return "", false
 }
 
 // IncompressibleExtensions 是「已压缩 / 本身不可再压缩」的常见扩展名集合（小写、含点）。
@@ -92,11 +186,18 @@ type Limits struct {
 }
 
 // Extract 解压 src 到 targetDir。智能合并：若压缩包仅含单一顶层目录，
-// 其内容直接并入 targetDir（避免双层嵌套）。passwords 用于加密 zip 的轮询尝试。
+// 其内容直接并入 targetDir（避免双层嵌套）。passwords 用于加密归档的轮询尝试。
+// 路由策略：分卷（含 PKWARE 末卷）与 7z 走 extractSniff——打开（必要时拼接分卷）后
+// 读头部魔数决定解码器，从而不依赖扩展名识别格式；其余单文件按扩展名走对应解压器。
 func Extract(ctx context.Context, src, targetDir string, passwords []string, limits Limits, p ProgressFn) error {
+	if _, _, isSplit, _ := EnumerateVolumes(src); isSplit {
+		return extractSniff(ctx, src, targetDir, passwords, limits, p)
+	}
 	switch Detect(src) {
 	case KindZip:
-		return extractZip(ctx, src, targetDir, passwords, limits, p)
+		return extractZipPath(ctx, src, targetDir, passwords, limits, p)
+	case KindSevenZip:
+		return extractSniff(ctx, src, targetDir, passwords, limits, p)
 	case KindTar:
 		return extractTar(ctx, src, targetDir, limits, p, false)
 	case KindTarGz:

@@ -20,6 +20,8 @@ const pendingPath = ref('')
 let loadToken = 0
 // 用 Set 保存选中路径：勾选态查找 O(1)，避免大目录下 O(n·m) 的 includes 扫描
 const selected = ref<Set<string>>(new Set())
+// shift 范围选择的锚点行索引（entries 中的位置），普通点击/ctrl 点击也会刷新锚点
+const anchorIndex = ref<number | null>(null)
 const submitting = ref(false)
 
 // 轻量级轮询：每 5 秒请求一次后端 file/status，用目录 mtime 判断是否需要刷新列表
@@ -74,6 +76,7 @@ async function load(path?: string) {
   if (loading.value) return
   loading.value = true
   selected.value = new Set()
+  anchorIndex.value = null
   const token = ++loadToken
   try {
     const resp = await api.listDir(path)
@@ -362,8 +365,58 @@ onMounted(async () => {
   window.addEventListener('keydown', onKeydown)
 })
 
-function onRowClick(_evt: unknown, row: FsEntry) {
-  openDir(row)
+// 在 entries 中按 path 定位行索引，避免依赖 q-table 传入的索引（排序/虚拟滚动下可能不一致）
+function indexOfRow(row: FsEntry): number {
+  return entries.value.findIndex((e) => e.path === row.path)
+}
+
+// 点击是否落在选择列单元格内（含复选框）。Quasar 未对该单元格阻止冒泡，
+// 点击复选框也会冒泡触发 row-click；此处放行，避免覆盖复选框的选中/取消行为，
+// 也避免点复选框"取消文件夹"时误触发进入目录。
+function isSelectionCell(evt: MouseEvent): boolean {
+  const el = evt.target as HTMLElement | null
+  return !!(el && el.closest('td.q-table--col-auto-width'))
+}
+
+// ctrl/shift 点击行的选择逻辑：与复选框共用同一个 selected 集合，互不冲突。
+function onRowClick(evt: Event, row: FsEntry) {
+  const me = evt as MouseEvent
+  // 点击复选框本身交给 Quasar 处理（选中/取消），不执行自定义行逻辑
+  if (isSelectionCell(me)) return
+
+  const idx = indexOfRow(row)
+  if (idx < 0) return
+
+  // shift：以锚点为起点选到当前行的连续范围（含两端），不触发文件夹导航
+  if (me.shiftKey) {
+    if (anchorIndex.value === null) anchorIndex.value = idx
+    const [a, b] = anchorIndex.value <= idx ? [anchorIndex.value, idx] : [idx, anchorIndex.value]
+    const next = new Set(selected.value)
+    for (let i = a; i <= b; i++) {
+      const e = entries.value[i]
+      if (e) next.add(e.path)
+    }
+    selected.value = next
+    return
+  }
+
+  // ctrl/⌘：单独切换该行选中态，并刷新锚点
+  if (me.ctrlKey || me.metaKey) {
+    const next = new Set(selected.value)
+    if (next.has(row.path)) next.delete(row.path)
+    else next.add(row.path)
+    selected.value = next
+    anchorIndex.value = idx
+    return
+  }
+
+  // 普通点击：文件夹进入目录；文件/压缩包则仅选中该项（替换选择），并刷新锚点
+  if (row.is_dir) {
+    openDir(row)
+    return
+  }
+  selected.value = new Set([row.path])
+  anchorIndex.value = idx
 }
 
 function onUpdateSelected(val: readonly FsEntry[]) {
