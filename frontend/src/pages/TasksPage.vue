@@ -32,7 +32,8 @@ const statusOptions = [
 const typeOptions = [
   { label: '全部', value: '' },
   { label: '解压', value: 'decompress' },
-  { label: '压缩', value: 'compress' }
+  { label: '压缩', value: 'compress' },
+  { label: '查重', value: 'dedup' }
 ]
 
 const items = ref<Task[]>([])
@@ -297,7 +298,13 @@ onMounted(() => {
         <template #body-cell-type="props">
           <q-td :props="props">
             <q-badge
-              :color="props.row.type === 'decompress' ? 'deep-orange' : 'teal'"
+              :color="
+                props.row.type === 'decompress'
+                  ? 'deep-orange'
+                  : props.row.type === 'dedup'
+                    ? 'purple'
+                    : 'teal'
+              "
               :label="typeLabel(props.row.type)"
             />
           </q-td>

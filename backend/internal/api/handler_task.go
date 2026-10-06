@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -211,6 +212,79 @@ func (a *API) CreateTasksBatch(c *gin.Context) {
 	}
 	a.pool.Enqueue()
 	c.JSON(201, gin.H{"created": len(ids), "ids": ids, "skipped": skipped})
+}
+
+type createDedupRequest struct {
+	Paths []string `json:"paths" binding:"required,min=2"`
+}
+
+// normalizePath 规范化输入路径：折叠多余分隔符与尾部斜杠、统一分隔符方向，
+// 并把 Windows 盘符统一大写（Windows 路径不区分大小写）。
+// 不做这步清洗时，同一目录的不同写法（D:\data\a 与 D:\data\a\、D:/data/a、d:\data\a）
+// 会被当成多个不同输入，导致同一文件被重复扫描、甚至在结果里"自己与自己重复"。
+func normalizePath(p string) string {
+	if strings.TrimSpace(p) == "" {
+		return ""
+	}
+	p = filepath.Clean(p)
+	if vol := filepath.VolumeName(p); vol != "" {
+		p = strings.ToUpper(vol) + p[len(vol):]
+	}
+	return p
+}
+
+// CreateDedupTask 为勾选的多条路径创建一条查重任务：只读扫描所选范围，
+// 找出内容重复的文件与文件夹，不改写任何文件。整批路径只生成一条任务。
+func (a *API) CreateDedupTask(c *gin.Context) {
+	var req createDedupRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(400, gin.H{"error": err.Error()})
+		return
+	}
+	seen := make(map[string]struct{}, len(req.Paths))
+	paths := make([]string, 0, len(req.Paths))
+	skipped := 0
+	for _, raw := range req.Paths {
+		p := normalizePath(raw)
+		if p == "" {
+			skipped++
+			continue
+		}
+		// 去重必须用规范化后的路径，否则同一目录的不同写法会被当成两个不同的输入
+		if _, dup := seen[p]; dup {
+			skipped++
+			continue
+		}
+		info, err := os.Stat(p)
+		// 不存在、无法访问或空文件跳过：空文件没有内容可比，计入 skipped
+		if err != nil || (!info.IsDir() && info.Size() == 0) {
+			skipped++
+			continue
+		}
+		seen[p] = struct{}{}
+		paths = append(paths, p)
+	}
+	if len(paths) < 2 {
+		c.JSON(400, gin.H{"error": "请至少选择 2 个有效文件或文件夹用于查重"})
+		return
+	}
+	sources, err := json.Marshal(paths)
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	task := model.Task{
+		Type:       model.TypeDedup,
+		SourcePath: paths[0],
+		Sources:    string(sources),
+		Status:     model.StatusPending,
+	}
+	if err := a.db.Create(&task).Error; err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	a.pool.Enqueue()
+	c.JSON(201, gin.H{"created": 1, "ids": []uint{task.ID}, "skipped": skipped})
 }
 
 type bulkRequest struct {

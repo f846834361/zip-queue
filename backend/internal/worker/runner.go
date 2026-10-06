@@ -2,10 +2,17 @@ package worker
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"hash"
+	"io"
+	iofs "io/fs"
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -109,6 +116,8 @@ func (r *Runner) Run(ctx context.Context, task *model.Task) {
 		r.runDecompress(ctx, task)
 	case model.TypeCompress:
 		r.runCompress(ctx, task)
+	case model.TypeDedup:
+		r.runDedup(ctx, task)
 	default:
 		r.fail(task, "unknown task type: "+task.Type)
 	}
@@ -305,6 +314,658 @@ func (r *Runner) runCompress(ctx context.Context, task *model.Task) {
 		return
 	}
 	r.succeed(task)
+}
+
+// 查重任务的资源约束（内部固定默认值，不暴露配置）：
+const (
+	// dedupConcurrency 限制同时读取文件的 goroutine 数，避免打满磁盘 IO/CPU、影响宿主机其他进程。
+	dedupConcurrency = 2
+	// dedupSampleSize 采样哈希读取的头/尾字节数。
+	dedupSampleSize = 64 << 10
+	// dedupReadBuffer 读文件的定长缓冲：内存占用恒定，绝不整文件入内存。
+	dedupReadBuffer = 1 << 20
+)
+
+// dedupFile 为一个待比对文件的元信息（不保存任何文件内容）。
+type dedupFile struct {
+	path string
+	size int64
+}
+
+// hashVal 为一次哈希的结果；full 表示哈希已覆盖文件全部内容（采样即全量）。
+type hashVal struct {
+	hash string
+	full bool
+}
+
+// dedupJob 为一次哈希任务（files 下标 + 路径）。
+type dedupJob struct {
+	idx  int
+	path string
+}
+
+// runDedup 执行查重任务：三阶段递进淘汰，全程只读、可取消。
+//  1. 按文件大小分组：大小唯一的文件必不重复，直接排除，不做任何读取；
+//  2. 对同大小文件做"头+尾"采样哈希：淘汰头尾不同的不同文件；
+//  3. 仅对采样哈希仍相同的候选做全量流式哈希，最终确认重复。
+//
+// 文件夹以其包含的全部文件身份集合为签名，签名相同（忽略目录层级）即判为重复文件夹。
+func (r *Runner) runDedup(ctx context.Context, task *model.Task) {
+	var sources []string
+	if task.Sources != "" {
+		if err := json.Unmarshal([]byte(task.Sources), &sources); err != nil {
+			r.fail(task, "查重任务的输入路径无法解析："+err.Error())
+			return
+		}
+	}
+	if len(sources) == 0 {
+		r.fail(task, "查重任务缺少输入路径")
+		return
+	}
+
+	files, dirs, dirFiles, err := collectDedupFiles(ctx, sources)
+	if err != nil {
+		if ctx.Err() != nil {
+			r.finishDedupInterrupt(task)
+			return
+		}
+		r.fail(task, "扫描查重范围失败："+classifyError(err))
+		return
+	}
+
+	tr := newDedupTracker(r, task.ID)
+
+	// 阶段一：按大小分组，仅"同大小且 ≥2 个"才可能是重复，进入采样
+	bySize := make(map[int64][]int, len(files))
+	for i, f := range files {
+		bySize[f.size] = append(bySize[f.size], i)
+	}
+	var sampleJobs []dedupJob
+	var sampleTotal int64
+	for _, idxs := range bySize {
+		if len(idxs) < 2 {
+			continue
+		}
+		for _, i := range idxs {
+			sampleJobs = append(sampleJobs, dedupJob{idx: i, path: files[i].path})
+			// 小文件采样即读全文，大文件只读头尾两段
+			sampleTotal += minInt64(files[i].size, dedupSampleSize*2)
+		}
+	}
+
+	// 阶段二：采样哈希（进度 0~80%）
+	tr.reset(sampleTotal, 0, 80)
+	sampleRes, err := runHashJobs(ctx, sampleJobs, files, func(ctx context.Context, f dedupFile) (hashVal, int64, error) {
+		return sampleHash(ctx, f.path, f.size)
+	}, tr.add)
+	if err != nil {
+		if ctx.Err() != nil {
+			r.finishDedupInterrupt(task)
+			return
+		}
+		r.fail(task, "采样哈希失败："+classifyError(err))
+		return
+	}
+
+	// 阶段三：仅"同大小同采样哈希且 ≥2 个"的大文件需要全量哈希（进度 80~100%）
+	fullJobs := dedupFullCandidates(files, sampleRes)
+	fullRes := map[int]hashVal{}
+	if len(fullJobs) > 0 {
+		var fullTotal int64
+		for _, j := range fullJobs {
+			fullTotal += files[j.idx].size
+		}
+		tr.reset(fullTotal, 80, 20)
+		fullRes, err = runHashJobs(ctx, fullJobs, files, func(ctx context.Context, f dedupFile) (hashVal, int64, error) {
+			h, n, herr := fullHash(ctx, f.path, f.size)
+			return hashVal{hash: h, full: true}, n, herr
+		}, tr.add)
+		if err != nil {
+			if ctx.Err() != nil {
+				r.finishDedupInterrupt(task)
+				return
+			}
+			r.fail(task, "全量哈希失败："+classifyError(err))
+			return
+		}
+	}
+
+	fileGroups, wasted := dedupFileGroups(files, sampleRes, fullRes)
+
+	// 文件夹判重：签名 = 所包含文件的身份集合，相同即重复（忽略目录层级）
+	folderGroups := dedupFolders(dirs, dirFiles, files, sampleRes, fullRes)
+
+	sortGroups(fileGroups)
+	sortGroups(folderGroups)
+
+	result := model.DedupResult{
+		DuplicateFiles:   fileGroups,
+		DuplicateFolders: folderGroups,
+		WastedBytes:      wasted,
+		TotalFiles:       len(files),
+		TotalFolders:     len(dirs),
+		CheckedBytes:     tr.readBytes(),
+	}
+	// 无重复时返回空数组而非 null，前端可直接使用 length
+	if result.DuplicateFiles == nil {
+		result.DuplicateFiles = []model.DedupGroup{}
+	}
+	if result.DuplicateFolders == nil {
+		result.DuplicateFolders = []model.DedupGroup{}
+	}
+	blob, err := json.Marshal(result)
+	if err != nil {
+		r.fail(task, "查重结果序列化失败："+err.Error())
+		return
+	}
+	r.succeedDedup(task, string(blob), result.CheckedBytes)
+}
+
+// collectDedupFiles 递归收集查重范围内待比对的文件：
+// 文件直接入选，目录递归收集其下文件并记录归属（供文件夹签名判重）。
+// 跳过空文件（无内容可比）与任务执行期临时目录。
+//
+// 每个文件在 files 中只收录一次（文件比对用），但会记入**每一个**包含它的勾选目录：
+// 父子目录同时被勾选时，子目录也必须拿到完整成员列表，否则它的签名为空、
+// 会被 dedupFolders 跳过，导致子目录无法参与文件夹判重。
+// seen 记录 路径 -> 在 files 中的下标。
+func collectDedupFiles(ctx context.Context, sources []string) ([]dedupFile, []string, map[string][]int, error) {
+	var files []dedupFile
+	var dirs []string
+	dirFiles := make(map[string][]int)
+	seen := make(map[string]int)
+	for _, src := range sources {
+		if ctx.Err() != nil {
+			return nil, nil, nil, ctx.Err()
+		}
+		info, err := os.Stat(src)
+		if err != nil {
+			continue // 创建任务时已校验存在，此处忽略中途消失的路径
+		}
+		if !info.IsDir() {
+			if info.Size() == 0 {
+				continue
+			}
+			if _, dup := seen[src]; dup {
+				continue
+			}
+			seen[src] = len(files)
+			files = append(files, dedupFile{path: src, size: info.Size()})
+			continue
+		}
+		dirs = append(dirs, src)
+		werr := filepath.WalkDir(src, func(p string, d iofs.DirEntry, werr error) error {
+			if werr != nil {
+				return werr
+			}
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if d.IsDir() {
+				// 跳过任务执行期的临时目录，避免扫到运行中任务的产物
+				if strings.HasPrefix(d.Name(), TempDirPrefix) {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			fi, ierr := d.Info()
+			if ierr != nil || fi.Size() == 0 {
+				return nil
+			}
+			// 已收录过的文件不重复入池，但仍要归属于当前这个勾选目录
+			idx, ok := seen[p]
+			if !ok {
+				idx = len(files)
+				seen[p] = idx
+				files = append(files, dedupFile{path: p, size: fi.Size()})
+			}
+			dirFiles[src] = append(dirFiles[src], idx)
+			return nil
+		})
+		if werr != nil {
+			return nil, nil, nil, werr
+		}
+	}
+	return files, dirs, dirFiles, nil
+}
+
+// runHashJobs 以受限并发执行哈希任务，返回 文件下标 -> 哈希结果。
+// 只记录首个错误（个别文件读失败不应中断整体查重）；ctx 取消后立即停止派发。
+func runHashJobs(ctx context.Context, jobs []dedupJob, files []dedupFile,
+	hasher func(ctx context.Context, f dedupFile) (hashVal, int64, error),
+	onRead func(int64)) (map[int]hashVal, error) {
+	sem := make(chan struct{}, dedupConcurrency)
+	var (
+		mu       sync.Mutex
+		res      = make(map[int]hashVal, len(jobs))
+		firstErr error
+		wg       sync.WaitGroup
+	)
+	for _, j := range jobs {
+		if ctx.Err() != nil {
+			break
+		}
+		wg.Add(1)
+		sem <- struct{}{} // 并发闸门：满了就等待，保证同时只有 dedupConcurrency 个文件在读
+		go func(j dedupJob) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			v, n, err := hasher(ctx, files[j.idx])
+			mu.Lock()
+			if err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+			} else {
+				res[j.idx] = v
+			}
+			mu.Unlock()
+			if n > 0 && onRead != nil {
+				onRead(n)
+			}
+		}(j)
+	}
+	wg.Wait()
+	mu.Lock()
+	defer mu.Unlock()
+	return res, firstErr
+}
+
+// sampleHash 计算"头+尾"采样哈希：先读头 dedupSampleSize 字节、再读尾同长度字节，
+// 累加进同一个 sha256。小文件（size <= 2*采样长度）直接读全文，此时采样哈希即全量哈希。
+func sampleHash(ctx context.Context, path string, size int64) (hashVal, int64, error) {
+	buf := make([]byte, dedupReadBuffer)
+	h := sha256.New()
+	if size <= dedupSampleSize*2 {
+		n, err := readRangeInto(ctx, h, path, 0, size, buf)
+		if err != nil {
+			return hashVal{}, n, err
+		}
+		return hashVal{hash: hex.EncodeToString(h.Sum(nil)), full: true}, n, nil
+	}
+	n1, err := readRangeInto(ctx, h, path, 0, dedupSampleSize, buf)
+	if err != nil {
+		return hashVal{}, n1, err
+	}
+	n2, err := readRangeInto(ctx, h, path, size-dedupSampleSize, dedupSampleSize, buf)
+	if err != nil {
+		return hashVal{}, n1 + n2, err
+	}
+	return hashVal{hash: hex.EncodeToString(h.Sum(nil))}, n1 + n2, nil
+}
+
+// fullHash 以定长缓冲流式计算整文件的 sha256。
+func fullHash(ctx context.Context, path string, size int64) (string, int64, error) {
+	h := sha256.New()
+	n, err := readRangeInto(ctx, h, path, 0, size, make([]byte, dedupReadBuffer))
+	if err != nil {
+		return "", n, err
+	}
+	return hex.EncodeToString(h.Sum(nil)), n, nil
+}
+
+// readRangeInto 从 path 的 off 处顺序读 length 字节并累加进 h，返回实际读取字节数。
+// 定长缓冲分块读取（不整文件入内存）；每轮检查 ctx，取消时立即停止读取。
+func readRangeInto(ctx context.Context, h hash.Hash, path string, off, length int64, buf []byte) (int64, error) {
+	if length <= 0 {
+		return 0, nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	if off > 0 {
+		if _, err := f.Seek(off, io.SeekStart); err != nil {
+			return 0, err
+		}
+	}
+	var read int64
+	for read < length {
+		if err := ctx.Err(); err != nil {
+			return read, err
+		}
+		want := len(buf)
+		if rem := length - read; rem < int64(want) {
+			want = int(rem)
+		}
+		nr, err := f.Read(buf[:want])
+		if nr > 0 {
+			h.Write(buf[:nr])
+			read += int64(nr)
+		}
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return read, err
+		}
+	}
+	return read, nil
+}
+
+// dedupFullCandidates 返回需要全量哈希的候选：同大小、同采样哈希且 ≥2 个的大文件。
+// 小文件（采样已覆盖全文）与采样组内只有 1 个的文件都不必再读一遍。
+func dedupFullCandidates(files []dedupFile, sampleRes map[int]hashVal) []dedupJob {
+	bySample := make(map[string][]int, len(sampleRes))
+	for idx, v := range sampleRes {
+		key := strconv.FormatInt(files[idx].size, 10) + "|" + v.hash
+		bySample[key] = append(bySample[key], idx)
+	}
+	var jobs []dedupJob
+	for _, idxs := range bySample {
+		if len(idxs) < 2 || files[idxs[0]].size <= dedupSampleSize*2 {
+			continue
+		}
+		for _, i := range idxs {
+			jobs = append(jobs, dedupJob{idx: i, path: files[i].path})
+		}
+	}
+	return jobs
+}
+
+// dedupFileGroups 汇总重复文件分组与可节省空间：
+//   - 小文件：采样哈希已覆盖全文，直接以 (大小, 采样哈希) 成组；
+//   - 大文件：以 (大小, 全量哈希) 成组，采样相同但全文不同者在此被正确排除。
+//
+// 组内 ≥2 个才算重复；可节省空间为 (副本数-1) × 单份大小。
+func dedupFileGroups(files []dedupFile, sampleRes, fullRes map[int]hashVal) ([]model.DedupGroup, int64) {
+	var out []model.DedupGroup
+	var wasted int64
+
+	bySample := make(map[string][]int, len(sampleRes))
+	for idx, v := range sampleRes {
+		if files[idx].size > dedupSampleSize*2 {
+			continue // 大文件以全量哈希为准
+		}
+		key := strconv.FormatInt(files[idx].size, 10) + "|" + v.hash
+		bySample[key] = append(bySample[key], idx)
+	}
+	for _, idxs := range bySample {
+		if len(idxs) < 2 {
+			continue
+		}
+		out = append(out, newDedupGroup(files[idxs[0]].size, sampleRes[idxs[0]].hash, pathsOf(files, idxs)))
+		wasted += files[idxs[0]].size * int64(len(idxs)-1)
+	}
+
+	byFull := make(map[string][]int, len(fullRes))
+	for idx, v := range fullRes {
+		key := strconv.FormatInt(files[idx].size, 10) + "|" + v.hash
+		byFull[key] = append(byFull[key], idx)
+	}
+	for _, idxs := range byFull {
+		if len(idxs) < 2 {
+			continue
+		}
+		out = append(out, newDedupGroup(files[idxs[0]].size, fullRes[idxs[0]].hash, pathsOf(files, idxs)))
+		wasted += files[idxs[0]].size * int64(len(idxs)-1)
+	}
+	return out, wasted
+}
+
+// dedupFolders 按"所含文件身份集合相同（忽略目录层级）"判定重复文件夹。
+// 文件身份优先用全量哈希、其次采样哈希、最后是唯一大小文件的合成身份——
+// 三种身份在本批文件内都与文件内容一一对应，不会造成误判。
+func dedupFolders(dirs []string, dirFiles map[string][]int, files []dedupFile,
+	sampleRes, fullRes map[int]hashVal) []model.DedupGroup {
+	if len(dirs) < 2 {
+		return nil
+	}
+	ident := make([]string, len(files))
+	for i, f := range files {
+		switch {
+		case fullRes[i].hash != "":
+			ident[i] = "h:" + fullRes[i].hash
+		case sampleRes[i].hash != "":
+			ident[i] = "s:" + sampleRes[i].hash
+		default:
+			// 大小唯一的文件不可能与其他文件相同，用大小+路径合成唯一身份
+			ident[i] = "u:" + strconv.FormatInt(f.size, 10) + ":" + f.path
+		}
+	}
+	bySig := make(map[string][]int, len(dirs))
+	sigSize := make(map[string]int64, len(dirs))
+	for di, d := range dirs {
+		var total int64
+		set := make(map[string]struct{})
+		for _, fi := range dirFiles[d] {
+			set[ident[fi]] = struct{}{}
+			total += files[fi].size
+		}
+		if len(set) == 0 {
+			continue // 空目录（或仅含空文件）不参与判重
+		}
+		keys := make([]string, 0, len(set))
+		for k := range set {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		// 对排序后的身份集合取哈希，得到定长签名，避免保存超长字符串
+		h := sha256.New()
+		for _, k := range keys {
+			h.Write([]byte(k))
+			h.Write([]byte{0})
+		}
+		sig := hex.EncodeToString(h.Sum(nil))
+		bySig[sig] = append(bySig[sig], di)
+		sigSize[sig] = total
+	}
+	var out []model.DedupGroup
+	for sig, dis := range bySig {
+		if len(dis) < 2 {
+			continue
+		}
+		paths := make([]string, 0, len(dis))
+		for _, di := range dis {
+			paths = append(paths, dirs[di])
+		}
+		sort.Slice(paths, func(i, j int) bool { return strings.ToLower(paths[i]) < strings.ToLower(paths[j]) })
+		out = append(out, newDedupGroup(sigSize[sig], "", paths))
+	}
+	return out
+}
+
+// pathsOf 取指定文件下标的路径列表（按路径排序，便于展示）。
+func pathsOf(files []dedupFile, idxs []int) []string {
+	paths := make([]string, 0, len(idxs))
+	for _, i := range idxs {
+		paths = append(paths, files[i].path)
+	}
+	sort.Slice(paths, func(i, j int) bool { return strings.ToLower(paths[i]) < strings.ToLower(paths[j]) })
+	return paths
+}
+
+// sortGroups 分组排序：先按单条大小降序（大文件冗余更值得关注），再按首条完整路径升序。
+func sortGroups(groups []model.DedupGroup) {
+	sort.Slice(groups, func(i, j int) bool {
+		if groups[i].Size != groups[j].Size {
+			return groups[i].Size > groups[j].Size
+		}
+		return firstPath(groups[i]) < firstPath(groups[j])
+	})
+}
+
+// firstPath 取分组中第一条条目的完整路径，用于分组间排序（确定性比较）。
+func firstPath(g model.DedupGroup) string {
+	if len(g.Buckets) == 0 || len(g.Buckets[0].Names) == 0 {
+		return ""
+	}
+	return g.Prefix + g.Buckets[0].Prefix + g.Buckets[0].Names[0]
+}
+
+// groupBySubdir 把去掉 prefix 的剩余部分按所在子目录分桶：
+// 同一子目录的条目合并为一个桶，桶内只保留文件名，避免长目录反复出现。
+func groupBySubdir(paths []string, prefix string) []model.DedupBucket {
+	type bucket struct {
+		prefix string
+		names  []string
+	}
+	order := make([]string, 0, 4)
+	byDir := make(map[string]*bucket)
+	for _, p := range paths {
+		dir, name := splitDirName(strings.TrimPrefix(p, prefix))
+		b, ok := byDir[dir]
+		if !ok {
+			b = &bucket{prefix: dir}
+			byDir[dir] = b
+			order = append(order, dir)
+		}
+		b.names = append(b.names, name)
+	}
+	sort.Slice(order, func(i, j int) bool {
+		return strings.ToLower(order[i]) < strings.ToLower(order[j])
+	})
+	out := make([]model.DedupBucket, 0, len(order))
+	for _, d := range order {
+		b := byDir[d]
+		sort.Slice(b.names, func(i, j int) bool {
+			return strings.ToLower(b.names[i]) < strings.ToLower(b.names[j])
+		})
+		out = append(out, model.DedupBucket{Prefix: b.prefix, Names: b.names})
+	}
+	return out
+}
+
+// splitDirName 把相对路径拆成「所在子目录（以分隔符结尾，无子目录时为空）+ 末段名称」。
+func splitDirName(rest string) (string, string) {
+	cut := strings.LastIndexAny(rest, `/\`)
+	if cut < 0 {
+		return "", rest
+	}
+	return rest[:cut+1], rest[cut+1:]
+}
+
+// commonDirPrefix 求全部路径的最长公共前缀，并回退到最后一个路径分隔符，
+// 保证结果是一个完整目录（以分隔符结尾）；没有公共目录时返回空串。
+// 按字节比较即可：分隔符为 ASCII，UTF-8 中不可能出现在多字节序列内部，截断位置必是字符边界。
+func commonDirPrefix(paths []string) string {
+	if len(paths) == 0 {
+		return ""
+	}
+	p := paths[0]
+	for _, q := range paths[1:] {
+		n := len(p)
+		if len(q) < n {
+			n = len(q)
+		}
+		i := 0
+		for i < n && p[i] == q[i] {
+			i++
+		}
+		p = p[:i]
+	}
+	cut := strings.LastIndexAny(p, `/\`)
+	if cut < 0 {
+		return ""
+	}
+	return p[:cut+1]
+}
+
+// newDedupGroup 构造重复分组：先取全组公共目录前缀，再按子目录拆成若干桶，
+// 使"超长公共前缀"与"深层子目录"都只出现一次。
+func newDedupGroup(size int64, hash string, paths []string) model.DedupGroup {
+	prefix := commonDirPrefix(paths)
+	return model.DedupGroup{
+		Size:    size,
+		Hash:    hash,
+		Prefix:  prefix,
+		Buckets: groupBySubdir(paths, prefix),
+	}
+}
+
+func minInt64(a, b int64) int64 {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+// dedupTracker 累加实际读取字节数，并把进度映射到当前阶段区间后节流回写。
+type dedupTracker struct {
+	runner *Runner
+	taskID uint
+	mu     sync.Mutex
+	read   int64 // 全程累计读取字节数
+	stage  int64 // 当前阶段已读字节数
+	total  int64 // 当前阶段预计读取字节数
+	base   int   // 当前阶段进度起点（百分比）
+	span   int   // 当前阶段进度跨度（百分比）
+	last   time.Time
+}
+
+func newDedupTracker(r *Runner, taskID uint) *dedupTracker {
+	return &dedupTracker{runner: r, taskID: taskID}
+}
+
+// reset 开启一个新阶段：total 为预计读取字节数，base/span 为该阶段占用的进度区间。
+func (t *dedupTracker) reset(total int64, base, span int) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.total, t.base, t.span = total, base, span
+	t.stage = 0
+	t.last = time.Time{}
+}
+
+func (t *dedupTracker) add(n int64) {
+	if n <= 0 {
+		return
+	}
+	t.mu.Lock()
+	t.read += n
+	t.stage += n
+	read, total, base, span := t.stage, t.total, t.base, t.span
+	now := time.Now()
+	// 阶段结束（读满预计字节）必定回写一次，其余按 256ms 节流（与 archive tracker 一致）
+	if read < total && now.Sub(t.last) < 256*time.Millisecond {
+		t.mu.Unlock()
+		return
+	}
+	t.last = now
+	t.mu.Unlock()
+	pct := base
+	if total > 0 {
+		pct = base + int(read*int64(span)/total)
+	}
+	if pct > 100 {
+		pct = 100
+	}
+	t.runner.updateTask(t.taskID, map[string]interface{}{
+		"processed_bytes":  t.read,
+		"total_bytes":      total,
+		"progress_percent": pct,
+	}, "写入查重进度")
+}
+
+// readBytes 返回全程累计读取字节数。
+func (t *dedupTracker) readBytes() int64 {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.read
+}
+
+// succeedDedup 收尾查重任务：写入结果 JSON 与成功状态。
+// 查重全程只读、不产生任何文件改动，因此不走 succeed 的文件列表缓存增量更新。
+func (r *Runner) succeedDedup(task *model.Task, result string, checked int64) {
+	r.updateTask(task.ID, map[string]interface{}{
+		"status":           model.StatusSucceeded,
+		"progress_percent": 100,
+		"processed_bytes":  checked,
+		"total_bytes":      checked,
+		"result":           result,
+		"completed_at":     time.Now(),
+		"error":            "",
+	}, "写入查重结果")
+}
+
+// finishDedupInterrupt 收尾被中断的查重任务：用户取消走 cancelled，服务中断走重排。
+// 查重无临时文件、无产物，无需任何清理。
+func (r *Runner) finishDedupInterrupt(task *model.Task) {
+	if r.chk != nil && r.chk.IsCancelled(task.ID) {
+		r.finishCancelled(task)
+		return
+	}
+	FinishInterrupted(r.db, task)
 }
 
 // progressFn 返回节流的进度回调：archive.tracker 每 256ms 调用一次。

@@ -177,6 +177,31 @@ func (a *API) DeletePassword(c *gin.Context) {
 	c.JSON(200, gin.H{"ok": true})
 }
 
+// SetAllPasswordsEnabled 批量启用/停用全部密码。用于配置页"一键全开/全禁"：一次调用把
+// 所有密码的 enabled 设为同一值，避免逐条请求。单事务保证原子性。
+func (a *API) SetAllPasswordsEnabled(c *gin.Context) {
+	var req struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(400, gin.H{"error": err.Error()})
+		return
+	}
+	tx := a.db.Begin()
+	// GORM 默认禁止无 WHERE 的全局更新；通过 Where("1 = 1") 显式允许本次全表更新，
+	// 不影响其它查询的防误改保护。
+	if err := tx.Model(&model.Password{}).Where("1 = 1").Update("enabled", req.Enabled).Error; err != nil {
+		tx.Rollback()
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	if err := tx.Commit().Error; err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(200, gin.H{"ok": true})
+}
+
 // SetPasswordEnabled 启用/停用某个密码。停用后该密码在解压轮询时会被跳过。
 func (a *API) SetPasswordEnabled(c *gin.Context) {
 	id, err := strconv.ParseUint(c.Param("id"), 10, 64)

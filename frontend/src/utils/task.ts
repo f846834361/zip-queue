@@ -42,5 +42,10 @@ export function statusLabel(status: string): string {
 }
 
 export function typeLabel(type: string): string {
-  return type === 'decompress' ? '解压' : '压缩'
+  switch (type) {
+    case 'decompress': return '解压'
+    case 'compress': return '压缩'
+    case 'dedup': return '查重'
+    default: return type
+  }
 }

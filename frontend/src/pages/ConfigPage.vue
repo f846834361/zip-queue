@@ -18,6 +18,8 @@ interface TablePagination {
 
 const passwords = ref<Password[]>([])
 const loading = ref(false)
+// 一键全开/全禁：是否正在提交；按钮文案随"下一步动作"变化（见 allEnabled）。
+const togglingAll = ref(false)
 const pagination = ref<TablePagination>({
   page: 1,
   rowsPerPage: 20,
@@ -313,6 +315,32 @@ function onRowClick(_evt: unknown, row: Password) {
   void toggleEnabled(row)
 }
 
+// 当前页是否全部已生效：决定一键按钮的下一步动作与文案。
+// 全部已生效 → 下一步是"全部禁用"；否则（含混合/全禁用）→ 下一步是"全部开启"。
+const allEnabled = computed(
+  () => passwords.value.length > 0 && passwords.value.every((p) => p.enabled)
+)
+
+// 一键全开/全禁：依据 allEnabled 翻转全部密码的生效状态，一次请求完成，避免逐行点击。
+async function toggleAllEnabled() {
+  if (togglingAll.value || passwords.value.length === 0) return
+  const next = !allEnabled.value
+  togglingAll.value = true
+  try {
+    await api.setAllPasswordsEnabled(next)
+    // 刷新当前页，使分页场景下也与后端一致
+    await fetchList()
+    $q.notify({
+      type: 'positive',
+      message: next ? '已开启全部密码' : '已禁用全部密码'
+    })
+  } catch (e) {
+    $q.notify({ type: 'negative', message: (e as Error).message })
+  } finally {
+    togglingAll.value = false
+  }
+}
+
 // 失效密码整行淡化，直观显示未生效
 function rowClass(row: Password): string {
   return row.enabled ? '' : 'row-disabled'
@@ -584,7 +612,20 @@ onMounted(() => {
       <q-card-section>
         <div class="row items-center justify-between q-mb-sm">
           <div class="text-h6 text-weight-medium">解压密码</div>
-          <q-btn color="primary" icon="add" label="添加" unelevated no-caps dense @click="openCreate" />
+          <div class="row q-gutter-sm">
+            <q-btn
+              :color="allEnabled ? 'grey-7' : 'positive'"
+              :icon="allEnabled ? 'visibility_off' : 'visibility'"
+              :label="allEnabled ? '全部禁用' : '全部开启'"
+              unelevated
+              no-caps
+              dense
+              :disable="passwords.length === 0 || togglingAll"
+              :loading="togglingAll"
+              @click="toggleAllEnabled"
+            />
+            <q-btn color="primary" icon="add" label="添加" unelevated no-caps dense @click="openCreate" />
+          </div>
         </div>
         <div class="text-caption text-grey-7 q-mb-md">
           按"序号"顺序轮询尝试，排在前的生效密码优先使用。拖动行到目标位置释放即可调整顺序；点击列表行可快速切换密码生效/失效，失效密码不会参与解压尝试。留空表示无密码压缩包正常解压。

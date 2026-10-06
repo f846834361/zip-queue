@@ -206,6 +206,9 @@ const canDecompress = computed(() =>
     selectedEntries.value.some((e) => e.is_archive)
 )
 const canCompress = computed(() => selectedEntries.value.length > 0)
+// 查重的唯一门槛是"单选还是多选"：单选（1 项，文件或文件夹都一样）隐藏按钮，
+// 多选（≥2 项，文件、文件夹或混合）即可查重，不再叠加其他条件。
+const canDedup = computed(() => selectedCount.value >= 2)
 
 // 通用二次确认弹窗，返回用户是否确认
 function confirmAction(title: string, message: string): Promise<boolean> {
@@ -287,6 +290,30 @@ async function handleCompress() {
             `将把当前目录下 ${bulkCompressibleCount.value} 项内容全部压缩为同名 .zip，任务完成后会删除原文件/文件夹。是否继续？`
         )
     if (go) await bulkCompress()
+  } finally {
+    submitting.value = false
+  }
+}
+
+// handleDedup 对勾选的全部路径创建一条查重任务：只读扫描、不改动任何文件。
+async function handleDedup() {
+  if (submitting.value) return
+  // 多选即可查重：文件、文件夹或混合都参与，具体有效性由后端校验
+  const items = selectedEntries.value
+  if (items.length < 2) return
+  const go = await confirmAction(
+      '确认查重',
+      `将为选中的 ${items.length} 项创建一条查重任务，扫描并找出内容重复的文件与文件夹。查重为只读操作，不会改动或删除任何文件。是否继续？`
+  )
+  if (!go) return
+  submitting.value = true
+  try {
+    const resp = await api.createDedupTask(items.map((e) => e.path))
+    const ignored = resp.skipped ? `，忽略 ${resp.skipped} 个无效项` : ''
+    $q.notify({ type: 'positive', message: `已创建查重任务${ignored}，可在任务列表查看详情` })
+    selected.value = new Set()
+  } catch (e) {
+    $q.notify({ type: 'negative', message: (e as Error).message })
   } finally {
     submitting.value = false
   }
@@ -483,6 +510,19 @@ function onUpdateSelected(val: readonly FsEntry[]) {
                 :disable="submitting || (selectedCount > 0 && !canCompress)"
                 :loading="submitting"
                 @click="handleCompress"
+            />
+            <!-- 查重：单选隐藏、多选（≥2 项，文件/文件夹均可）显示 -->
+            <q-btn
+                v-if="canDedup"
+                color="primary"
+                icon="content_copy"
+                label="查重"
+                unelevated
+                no-caps
+                dense
+                :disable="submitting"
+                :loading="submitting"
+                @click="handleDedup"
             />
           </div>
           <div v-if="selectedCount" class="text-caption text-grey-7">

@@ -28,6 +28,7 @@ func Register(r *gin.RouterGroup, gdb *gorm.DB, pool *worker.Pool, cfg *config.C
 	r.POST("/tasks/wake", a.WakeTasks)
 	r.POST("/tasks/bulk-decompress-folder", a.BulkDecompress)
 	r.POST("/tasks/bulk-compress-folder", a.BulkCompress)
+	r.POST("/tasks/dedup", a.CreateDedupTask)
 	r.GET("/tasks", a.ListTasks)
 	r.GET("/tasks/active", a.ActiveTasks)
 	r.GET("/tasks/source-suggest", a.SuggestSourcePaths)
@@ -41,5 +42,6 @@ func Register(r *gin.RouterGroup, gdb *gorm.DB, pool *worker.Pool, cfg *config.C
 	r.PATCH("/passwords/:id", a.UpdatePassword)
 	r.PATCH("/passwords/:id/enabled", a.SetPasswordEnabled)
 	r.DELETE("/passwords/:id", a.DeletePassword)
+	r.POST("/passwords/enabled", a.SetAllPasswordsEnabled)
 	r.POST("/passwords/reorder", a.ReorderPasswords)
 }

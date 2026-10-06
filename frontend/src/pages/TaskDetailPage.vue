@@ -2,7 +2,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useQuasar } from 'quasar'
-import api, { type Task } from '../api'
+import api, { type DedupGroup, type DedupResult, type Task } from '../api'
 import { formatDateTime, formatSize } from '../utils/format'
 import { POLL_INTERVAL, statusColor, statusLabel, typeLabel, compressionLabel } from '../utils/task'
 import { usePolling } from '../composables/usePolling'
@@ -30,6 +30,39 @@ const isFinished = computed(
     task.value?.status === 'cancelled'
 )
 const isFailed = computed(() => task.value?.status === 'failed')
+
+// 查重结果：后端以 JSON 写入 task.result，解析失败（或任务未完成）时不展示结果区块
+const dedupResult = computed<DedupResult | null>(() => {
+  if (!task.value || task.value.type !== 'dedup' || !task.value.result) return null
+  try {
+    return JSON.parse(task.value.result) as DedupResult
+  } catch {
+    return null
+  }
+})
+
+// 查重任务勾选的输入路径集合，供详情页回显查重范围
+const dedupSources = computed<string[]>(() => {
+  if (!task.value || task.value.type !== 'dedup' || !task.value.sources) return []
+  try {
+    const arr = JSON.parse(task.value.sources) as string[]
+    return Array.isArray(arr) ? arr : []
+  } catch {
+    return []
+  }
+})
+
+const hasDuplicates = computed(
+  () =>
+    !!dedupResult.value &&
+    (dedupResult.value.duplicate_files.length > 0 ||
+      dedupResult.value.duplicate_folders.length > 0)
+)
+
+// 一个重复分组内的条目总数（跨全部子目录桶）
+function groupCount(g: DedupGroup): number {
+  return g.buckets.reduce((n, b) => n + b.names.length, 0)
+}
 
 // 轮询直到任务结束或请求出错
 const polling = usePolling(refresh, POLL_INTERVAL)
@@ -186,7 +219,13 @@ onMounted(loadInitial)
             <div class="text-caption text-grey-7">类型</div>
             <q-badge
               v-if="task"
-              :color="task.type === 'decompress' ? 'deep-orange' : 'teal'"
+              :color="
+                task.type === 'decompress'
+                  ? 'deep-orange'
+                  : task.type === 'dedup'
+                    ? 'purple'
+                    : 'teal'
+              "
               :label="typeLabel(task.type)"
               class="q-mt-xs"
             />
@@ -210,9 +249,16 @@ onMounted(loadInitial)
           </div>
           <div class="col-12">
             <div class="text-caption text-grey-7">源路径</div>
-            <div class="mono text-break-all q-mt-xs">{{ task?.source_path || '—' }}</div>
+            <!-- 查重任务回显勾选的全部输入路径 -->
+            <template v-if="dedupSources.length">
+              <div v-for="p in dedupSources" :key="p" class="mono text-break-all q-mt-xs">
+                {{ p }}
+              </div>
+            </template>
+            <div v-else class="mono text-break-all q-mt-xs">{{ task?.source_path || '—' }}</div>
           </div>
-          <div class="col-12">
+          <!-- 查重为只读扫描，没有目标路径 -->
+          <div v-if="!task || task.type !== 'dedup'" class="col-12">
             <div class="text-caption text-grey-7">目标路径</div>
             <div class="mono text-break-all q-mt-xs">{{ task?.target_path || '—' }}</div>
           </div>
@@ -276,6 +322,145 @@ onMounted(loadInitial)
             </q-item-section>
           </q-item>
         </q-list>
+      </q-card-section>
+    </q-card>
+
+    <!-- 查重任务：任务结束后展示重复文件/文件夹分组 -->
+    <q-card v-if="dedupResult && isFinished" flat bordered class="q-mb-md">
+      <q-card-section>
+        <div class="text-subtitle2 text-weight-medium q-mb-sm">重复项</div>
+
+        <div class="row q-col-gutter-md q-mb-md">
+          <div class="col-6 col-md-3">
+            <div class="text-caption text-grey-7">重复文件组</div>
+            <div class="text-subtitle1 text-weight-medium">
+              {{ dedupResult.duplicate_files.length }}
+            </div>
+          </div>
+          <div class="col-6 col-md-3">
+            <div class="text-caption text-grey-7">重复文件夹组</div>
+            <div class="text-subtitle1 text-weight-medium">
+              {{ dedupResult.duplicate_folders.length }}
+            </div>
+          </div>
+          <div class="col-6 col-md-3">
+            <div class="text-caption text-grey-7">可节省空间</div>
+            <div class="text-subtitle1 text-weight-medium text-negative">
+              {{ formatSize(dedupResult.wasted_bytes) }}
+            </div>
+          </div>
+          <div class="col-6 col-md-3">
+            <div class="text-caption text-grey-7">已扫描 / 实际读取</div>
+            <div class="text-subtitle1 text-weight-medium">
+              {{ dedupResult.total_files }} 项 · {{ formatSize(dedupResult.checked_bytes) }}
+            </div>
+          </div>
+        </div>
+
+        <div v-if="!hasDuplicates" class="text-center text-grey-7 q-py-md">
+          未发现重复文件或文件夹
+        </div>
+
+        <template v-else>
+          <div v-if="dedupResult.duplicate_files.length" class="q-mb-md">
+            <div class="text-caption text-grey-7 q-mb-xs">
+              重复文件（内容完全相同，保留一份即可）
+            </div>
+            <q-list dense separator>
+              <q-item
+                v-for="(g, gi) in dedupResult.duplicate_files"
+                :key="`file-${gi}`"
+                class="q-py-sm"
+              >
+                <q-item-section>
+                  <q-item-label class="text-weight-medium">
+                    {{ formatSize(g.size) }}
+                    <span class="text-caption text-grey-7 q-ml-sm">
+                      {{ groupCount(g) }} 个副本
+                    </span>
+                  </q-item-label>
+                  <!-- 一级：全组公共目录，灰色小字 + 目录图标 -->
+                  <div v-if="g.prefix" class="row items-center no-wrap q-mt-xs">
+                    <q-icon name="folder_open" size="14px" color="grey-5" class="q-mr-xs" />
+                    <span class="mono text-caption text-grey-6 text-break-all">
+                      {{ g.prefix }}
+                    </span>
+                  </div>
+                  <!-- 二级：按子目录分桶，每个桶只写一次子目录 -->
+                  <div v-for="(b, bi) in g.buckets" :key="bi">
+                    <div v-if="b.prefix" class="row items-center no-wrap q-ml-md q-mt-xs">
+                      <q-icon name="subdirectory_arrow_right" size="14px" color="grey-4" class="q-mr-xs" />
+                      <span class="mono text-caption text-grey-6 text-break-all">
+                        {{ b.prefix }}
+                      </span>
+                    </div>
+                    <div
+                      v-for="n in b.names"
+                      :key="n"
+                      class="row items-start no-wrap q-ml-xl q-mt-xs"
+                    >
+                      <q-icon name="description" size="14px" color="blue-grey-4" class="q-mr-xs" />
+                      <span class="mono text-body2 text-weight-medium text-dark text-break-all">
+                        {{ n }}
+                      </span>
+                    </div>
+                  </div>
+                </q-item-section>
+              </q-item>
+            </q-list>
+          </div>
+
+          <div v-if="dedupResult.duplicate_folders.length">
+            <div class="text-caption text-grey-7 q-mb-xs">
+              重复文件夹（所含文件内容相同，忽略目录层级）
+            </div>
+            <q-list dense separator>
+              <q-item
+                v-for="(g, gi) in dedupResult.duplicate_folders"
+                :key="`dir-${gi}`"
+                class="q-py-sm"
+              >
+                <q-item-section side>
+                  <q-icon name="folder" color="amber-8" />
+                </q-item-section>
+                <q-item-section>
+                  <q-item-label class="text-weight-medium">
+                    {{ formatSize(g.size) }}
+                    <span class="text-caption text-grey-7 q-ml-sm">
+                      {{ groupCount(g) }} 个副本
+                    </span>
+                  </q-item-label>
+                  <!-- 一级：公共父目录，灰色小字 + 目录图标 -->
+                  <div v-if="g.prefix" class="row items-center no-wrap q-mt-xs">
+                    <q-icon name="folder_open" size="14px" color="grey-5" class="q-mr-xs" />
+                    <span class="mono text-caption text-grey-6 text-break-all">
+                      {{ g.prefix }}
+                    </span>
+                  </div>
+                  <!-- 二级：按子目录分桶 -->
+                  <div v-for="(b, bi) in g.buckets" :key="bi">
+                    <div v-if="b.prefix" class="row items-center no-wrap q-ml-md q-mt-xs">
+                      <q-icon name="subdirectory_arrow_right" size="14px" color="grey-4" class="q-mr-xs" />
+                      <span class="mono text-caption text-grey-6 text-break-all">
+                        {{ b.prefix }}
+                      </span>
+                    </div>
+                    <div
+                      v-for="n in b.names"
+                      :key="n"
+                      class="row items-start no-wrap q-ml-xl q-mt-xs"
+                    >
+                      <q-icon name="folder" size="14px" color="amber-8" class="q-mr-xs" />
+                      <span class="mono text-body2 text-weight-medium text-dark text-break-all">
+                        {{ n }}
+                      </span>
+                    </div>
+                  </div>
+                </q-item-section>
+              </q-item>
+            </q-list>
+          </div>
+        </template>
       </q-card-section>
     </q-card>
 
