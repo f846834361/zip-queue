@@ -36,7 +36,7 @@ export interface FileStatusResponse {
 
 export interface Task {
   id: number
-  type: 'decompress' | 'compress'
+  type: 'decompress' | 'compress' | 'dedup'
   source_path: string
   target_path: string
   temp_path: string
@@ -46,11 +46,51 @@ export interface Task {
   total_bytes: number
   error: string
   requeue_count: number
+  /** 查重任务的输入路径集合（JSON 字符串数组）；其他类型为空。 */
+  sources?: string
+  /** 查重任务的结论（JSON，见 DedupResult）；其他类型为空。 */
+  result?: string
   /** 压缩任务执行时实际使用的效率档位；解压任务及历史记录为 null/缺省。 */
   compression_level?: 'fastest' | 'fast' | 'normal' | 'slow' | null
   created_at: string
   started_at: string | null
   completed_at: string | null
+}
+
+/**
+ * 一组内容相同的条目（文件或文件夹）。
+ * 同组条目几乎总在同一个深层目录下，因此只保存一次公共前缀，
+ * 其余为前缀之后的文件名，避免超长路径被重复 N 遍。
+ */
+export interface DedupGroup {
+  /** 单个条目的大小（文件夹组为其包含文件的总大小）。 */
+  size: number
+  /** 文件组的内容哈希；文件夹组缺省。 */
+  hash?: string
+  /** 该组全部条目的公共目录前缀（以分隔符结尾）；无公共目录时为空串。 */
+  prefix: string
+  /** 在 prefix 之下按子目录拆分的条目桶，长目录只出现一次。 */
+  buckets: DedupBucket[]
+}
+
+/** 同一子目录下的一组互为副本的条目。 */
+export interface DedupBucket {
+  /** 相对所属分组 prefix 之后的子目录（以分隔符结尾）；就在分组根目录下时为空串。 */
+  prefix: string
+  /** 该子目录下的条目名（路径末段），按名称排序。 */
+  names: string[]
+}
+
+/** 查重任务（dedup）的结论，后端以 JSON 存入 Task.result。 */
+export interface DedupResult {
+  duplicate_files: DedupGroup[]
+  duplicate_folders: DedupGroup[]
+  /** 删除重复副本后可节省的空间（字节）。 */
+  wasted_bytes: number
+  total_files: number
+  total_folders: number
+  /** 本次实际从磁盘读取的字节数（采样 + 全量哈希）。 */
+  checked_bytes: number
 }
 
 export interface RetryTaskResponse {
@@ -171,6 +211,10 @@ export const api = {
   async createTasksBatch(type: 'decompress' | 'compress', paths: string[]): Promise<BatchCreateResponse> {
     return (await http.post<BatchCreateResponse>('/tasks/batch', { type, paths })).data
   },
+  /** 勾选多条路径后创建一条查重任务（只读扫描，不改动任何文件）。 */
+  async createDedupTask(paths: string[]): Promise<BulkResponse> {
+    return (await http.post<BulkResponse>('/tasks/dedup', { paths })).data
+  },
   async wakeTasks(): Promise<WakeResponse> {
     return (await http.post<WakeResponse>('/tasks/wake')).data
   },
@@ -208,6 +252,9 @@ export const api = {
   },
   async setPasswordEnabled(id: number, enabled: boolean): Promise<Password> {
     return (await http.patch<Password>(`/passwords/${id}/enabled`, { enabled })).data
+  },
+  async setAllPasswordsEnabled(enabled: boolean): Promise<void> {
+    await http.post('/passwords/enabled', { enabled })
   },
   async deletePassword(id: number): Promise<void> {
     await http.delete(`/passwords/${id}`)

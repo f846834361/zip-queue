@@ -86,6 +86,8 @@ func Requeue(db *gorm.DB, t *model.Task) (*model.Task, error) {
 		Status:       model.StatusPending,
 		RequeueCount: t.RequeueCount + 1,
 		CreatedAt:    time.Now(),
+		// 查重任务的输入路径集合：重排后仍需按同一批路径重新扫描（其他类型为空，无副作用）。
+		Sources: t.Sources,
 	}
 	if err := db.Create(&nt).Error; err != nil {
 		return nil, err
