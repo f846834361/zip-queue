@@ -333,6 +333,8 @@ func extractSniff(ctx context.Context, src, targetDir string, passwords []string
 		return extractZip(ctx, zr, total, targetDir, passwords, limits, p)
 	case is7zMagic(buf):
 		return extract7z(ctx, ra, total, targetDir, passwords, limits, p)
+	case isRarMagic(buf):
+		return extractRarWith(ctx, readerAtRarOpener(ra, total), total, targetDir, passwords, limits, p)
 	default:
 		return ErrUnsupportedFormat
 	}

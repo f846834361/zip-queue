@@ -21,7 +21,7 @@ func classifyError(err error) string {
 	case errors.Is(err, archive.ErrPasswordRequired):
 		return "压缩包已加密，但未配置匹配的解压密码。请在「配置」页面添加密码后重试。"
 	case errors.Is(err, archive.ErrUnsupportedFormat):
-		return "不支持的压缩格式，仅支持 zip / tar / tar.gz / gz。"
+		return "不支持的压缩格式，仅支持 zip / rar / 7z / tar / tar.gz / gz。"
 	}
 
 	msg := err.Error()
@@ -79,8 +79,14 @@ func classifyError(err error) string {
 
 	// 8. 密码错误（alexmullins/zip 返回 ErrPassword）
 	if strings.Contains(msg, "zip: invalid password") ||
-		strings.Contains(msg, "zip: authentication failed") {
+		strings.Contains(msg, "zip: authentication failed") ||
+		strings.Contains(lower, "incorrect password") {
 		return "解压密码错误，请检查「配置」页面中的解压密码。"
+	}
+
+	// 8b. rar 归档损坏/读取失败
+	if strings.Contains(lower, "rardecode:") {
+		return "压缩包已损坏或格式不正确，无法解压。"
 	}
 
 	// 9. 空文件夹
