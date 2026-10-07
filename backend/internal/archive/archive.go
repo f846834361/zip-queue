@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -22,10 +24,11 @@ const (
 	KindTarGz
 	KindGzip
 	KindSevenZip
+	KindRar
 )
 
 // ArchiveExtensions 是批量扫描时识别的扩展名集合（按长后缀优先）。
-var ArchiveExtensions = []string{".tar.gz", ".tgz", ".tar", ".zip", ".7z", ".gz"}
+var ArchiveExtensions = []string{".tar.gz", ".tgz", ".tar", ".zip", ".7z", ".rar", ".gz"}
 
 // splitVolumeInfo 识别分卷文件名，返回逻辑基名 base、卷序号 idx、类型 kind 与 ok。
 // 不依赖具体归档格式（格式由解压时的魔数嗅探决定），支持：
@@ -93,6 +96,8 @@ func Detect(path string) Kind {
 	switch {
 	case strings.HasSuffix(lower, ".7z"):
 		return KindSevenZip
+	case strings.HasSuffix(lower, ".rar"):
+		return KindRar
 	case strings.HasSuffix(lower, ".zip"):
 		return KindZip
 	case strings.HasSuffix(lower, ".tar.gz"), strings.HasSuffix(lower, ".tgz"):
@@ -103,6 +108,36 @@ func Detect(path string) Kind {
 		return KindGzip
 	}
 	return KindUnknown
+}
+
+// DetectMagic 读取文件头魔数判定真实格式，用于纠正被误标的扩展名。
+// 仅识别魔数唯一、无歧义的格式（zip / 7z / rar）；无法确定时返回 KindUnknown。
+func DetectMagic(path string) Kind {
+	f, err := os.Open(path)
+	if err != nil {
+		return KindUnknown
+	}
+	defer f.Close()
+	buf := make([]byte, 8)
+	n, _ := io.ReadFull(f, buf)
+	if n < 4 {
+		return KindUnknown // 空文件或不足一个魔数长度：交给扩展名/解码器报更准确的错
+	}
+	switch {
+	case isZipMagic(buf):
+		return KindZip
+	case is7zMagic(buf):
+		return KindSevenZip
+	case isRarMagic(buf):
+		return KindRar
+	}
+	return KindUnknown
+}
+
+// isRarMagic 判断是否为 RAR 签名（Rar!\x1A\x07，RAR4 与 RAR5 共用前 6 字节）。
+func isRarMagic(b []byte) bool {
+	return len(b) >= 6 && b[0] == 'R' && b[1] == 'a' && b[2] == 'r' &&
+		b[3] == '!' && b[4] == 0x1A && b[5] == 0x07
 }
 
 // IsSupportedArchive 判断给定路径是否为受支持的压缩包（单文件或分卷入口）。
@@ -193,11 +228,24 @@ func Extract(ctx context.Context, src, targetDir string, passwords []string, lim
 	if _, _, isSplit, _ := EnumerateVolumes(src); isSplit {
 		return extractSniff(ctx, src, targetDir, passwords, limits, p)
 	}
+	// 扩展名可能被误标（如把 rar/7z 命名成 .zip），文件头魔数更可信。
+	// zip / 7z / rar 的魔数唯一且与其它格式无歧义，命中即优先按魔数路由；
+	// gzip 与 .tar.gz 存在歧义（同一魔数），故 gzip 不参与覆盖，仍按扩展名路由。
+	switch DetectMagic(src) {
+	case KindZip:
+		return extractZipPath(ctx, src, targetDir, passwords, limits, p)
+	case KindSevenZip:
+		return extractSniff(ctx, src, targetDir, passwords, limits, p)
+	case KindRar:
+		return extractRar(ctx, src, targetDir, passwords, limits, p)
+	}
 	switch Detect(src) {
 	case KindZip:
 		return extractZipPath(ctx, src, targetDir, passwords, limits, p)
 	case KindSevenZip:
 		return extractSniff(ctx, src, targetDir, passwords, limits, p)
+	case KindRar:
+		return extractRar(ctx, src, targetDir, passwords, limits, p)
 	case KindTar:
 		return extractTar(ctx, src, targetDir, limits, p, false)
 	case KindTarGz:
