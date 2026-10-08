@@ -27,6 +27,25 @@ const (
 	KindRar
 )
 
+// String 返回类型的可读名称，用于报错与日志。
+func (k Kind) String() string {
+	switch k {
+	case KindZip:
+		return "zip"
+	case KindTar:
+		return "tar"
+	case KindTarGz:
+		return "tar.gz"
+	case KindGzip:
+		return "gzip"
+	case KindSevenZip:
+		return "7z"
+	case KindRar:
+		return "rar"
+	}
+	return "unknown"
+}
+
 // ArchiveExtensions 是批量扫描时识别的扩展名集合（按长后缀优先）。
 var ArchiveExtensions = []string{".tar.gz", ".tgz", ".tar", ".zip", ".7z", ".rar", ".gz"}
 
@@ -62,6 +81,27 @@ func splitVolumeInfo(name string) (base string, idx int, kind string, ok bool) {
 		if num != "" && isAllDigits(num) && len(num) >= 2 {
 			n, _ := strconv.Atoi(num)
 			return name[:i], n, "pkware", true
+		}
+	}
+	// RAR 新式分卷：base.partN.rar / base.partNN.rar / base.partNofM.rar
+	if i := strings.LastIndex(lower, ".part"); i >= 0 {
+		rest := lower[i+len(".part"):]
+		if dot := strings.IndexByte(rest, '.'); dot > 0 {
+			num := rest[:dot]
+			ext := strings.TrimSuffix(rest[dot+1:], ".rar")
+			// partN.rar：ext 为空（rest 形如 "1.rar"）；partNofM.rar：ext 形如 "of5"
+			if isAllDigits(num) && (ext == "rar" || strings.HasPrefix(ext, "of")) {
+				n, _ := strconv.Atoi(num)
+				return name[:i], n, "rarmulti", true
+			}
+		}
+	}
+	// RAR 旧式分卷续卷：base.rNN（首卷为 base.rar，续卷从 .r00 起）
+	if i := strings.LastIndex(lower, ".r"); i >= 0 {
+		num := lower[i+2:]
+		if len(num) >= 2 && isAllDigits(num) {
+			n, _ := strconv.Atoi(num)
+			return name[:i], n + 1, "rarold", true // .r00 记为序 1，与首卷 .rar（序 0）衔接
 		}
 	}
 	return "", 0, "", false
@@ -167,8 +207,9 @@ func SplitSetKey(path string) (string, bool) {
 		return filepath.Join(dir, base), true
 	}
 	lower := strings.ToLower(name)
-	if strings.HasSuffix(lower, ".zip") {
-		if b := strings.TrimSuffix(name, ".zip"); b != "" {
+	// .zip / .rar 单文件也纳入 key，使其与同名的 PKWARE / RAR 分卷合并为同一集合
+	if strings.HasSuffix(lower, ".zip") || strings.HasSuffix(lower, ".rar") {
+		if b := strings.TrimSuffix(name, filepath.Ext(name)); b != "" {
 			return filepath.Join(dir, b), true
 		}
 	}
@@ -225,7 +266,16 @@ type Limits struct {
 // 路由策略：分卷（含 PKWARE 末卷）与 7z 走 extractSniff——打开（必要时拼接分卷）后
 // 读头部魔数决定解码器，从而不依赖扩展名识别格式；其余单文件按扩展名走对应解压器。
 func Extract(ctx context.Context, src, targetDir string, passwords []string, limits Limits, p ProgressFn) error {
-	if _, _, isSplit, _ := EnumerateVolumes(src); isSplit {
+	vols, _, isSplit, verr := EnumerateVolumes(src)
+	if verr != nil {
+		return verr
+	}
+	if isSplit {
+		// RAR 分卷的每一卷都自带归档头，不能像 zip/7z 那样按字节拼接；
+		// 以首卷为入口交给 rardecode，由它按命名规则自行续卷。
+		if len(vols) > 0 && DetectMagic(vols[0]) == KindRar {
+			return extractRarVolumes(ctx, vols, targetDir, passwords, limits, p)
+		}
 		return extractSniff(ctx, src, targetDir, passwords, limits, p)
 	}
 	// 扩展名可能被误标（如把 rar/7z 命名成 .zip），文件头魔数更可信。

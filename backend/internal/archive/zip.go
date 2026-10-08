@@ -183,70 +183,112 @@ func tryPasswords(zr *zip.Reader, passwords []string) (string, bool, error) {
 	return "", false, ErrPasswordRequired
 }
 
-// EnumerateVolumes 给定分卷入口（任意一卷，或单文件 .zip），返回该归档的全部卷路径、
+// EnumerateVolumes 给定分卷入口（任意一卷，或单文件归档），返回该归档的全部卷路径、
 // 逻辑名、是否为分卷。逻辑名用于推导解压目标文件夹名与运行锁 key；任一分卷缺失或不连续时返回错误。
-//   - PKWARE：base.z01, base.z02, …, base.zip（末卷为 .zip）
-//   - 7-Zip ：base.zip.001, base.zip.002, …, base.zip.NNN（末卷不带 .zip）
 //
-// 入口可以是任意一卷：由后缀反推逻辑基名 base，再扫描同目录相邻分卷还原全套。
+// 关键设计：分卷查找严格按真实压缩类型分发，不使用“通用数字后缀”兜底——否则会出现
+// 把无关的数字后缀文件（如 name.001）误认为某归档的分卷。流程如下：
+//   1. 先用文件头魔数（扩展名不可靠）判定真实类型 Kind，未知时回退扩展名；
+//   2. 入口命名像分卷时，校验其分卷命名类型与真实类型相符，相符才展开；
+//   3. 入口是单文件命名时，按真实类型去同目录查找对应的兄弟卷命名。
+//
+// 各类型分卷命名：
+//   - zip  ：PKWARE 风格 base.z01…base.z(N) + 末卷 base.zip；或数字分卷 base.zip.001…
+//   - 7z   ：数字分卷 base.7z.001, base.7z.002, …
+//   - rar  ：新式 base.partN.rar；旧式 base.rar（首卷）+ base.r00, base.r01, …
 func EnumerateVolumes(src string) (vols []string, logicalName string, isSplit bool, err error) {
 	dir := filepath.Dir(src)
 	name := filepath.Base(src)
-	base, _, kind, ok := splitVolumeInfo(name)
-	if ok {
-		return enumerateSplit(dir, base, kind)
+
+	// 真实压缩类型优先（魔数比扩展名可靠，扩展名可能是误标）；未知时回退扩展名
+	at := DetectMagic(src)
+	if at == KindUnknown {
+		at = Detect(src)
 	}
-	// 非分卷后缀：可能是单文件 .zip，或是 PKWARE 末卷 base.zip（存在 base.z01 兄弟）
-	lower := strings.ToLower(name)
-	if strings.HasSuffix(lower, ".zip") {
+
+	// 1) 入口命名像分卷：解析基名。强命名分卷（带容器扩展名或专属后缀）直接按命名带出的
+	//    类型展开；仅“无容器扩展名的纯数字分卷”（如 name.001）需要真实类型兜底，避免把
+	//    无关的数字后缀文件误当分卷。
+	if base, _, nameKind, ok := splitVolumeInfo(name); ok {
+		if nameType := nameKindToType(nameKind, base); nameType != KindUnknown {
+			return enumerateSplit(dir, base, nameType)
+		}
+		if at != KindUnknown {
+			return enumerateSplit(dir, base, at)
+		}
+		return []string{src}, strings.TrimSuffix(name, filepath.Ext(name)), false, nil
+	}
+
+	// 2) 入口是单文件命名：按真实类型查找同目录兄弟卷
+	switch at {
+	case KindZip:
 		b := strings.TrimSuffix(name, ".zip")
 		if _, serr := os.Stat(filepath.Join(dir, b+".z01")); serr == nil {
-			return enumerateSplit(dir, b, "pkware")
+			return enumerateSplit(dir, b, KindZip)
 		}
-		return []string{src}, b, false, nil
+		if m, _ := filepath.Glob(filepath.Join(dir, b+".zip.[0-9]*")); len(m) > 0 {
+			return enumerateSplit(dir, b, KindZip)
+		}
+	case KindSevenZip:
+		b := strings.TrimSuffix(name, ".7z")
+		if m, _ := filepath.Glob(filepath.Join(dir, b+".7z.[0-9]*")); len(m) > 0 {
+			return enumerateSplit(dir, b, KindSevenZip)
+		}
+	case KindRar:
+		b := strings.TrimSuffix(name, ".rar")
+		if m, _ := filepath.Glob(filepath.Join(dir, b+".r00")); len(m) > 0 {
+			return enumerateSplit(dir, b, KindRar)
+		}
+		if m, _ := filepath.Glob(filepath.Join(dir, b+".part*.rar")); len(m) > 0 {
+			return enumerateSplit(dir, b, KindRar)
+		}
 	}
-	// 理论不可达：调用方已用 Detect 保证为 zip
 	return []string{src}, strings.TrimSuffix(name, filepath.Ext(name)), false, nil
 }
 
-// enumerateSplit 收集某一分卷集的全部卷（按序号升序），并校验连续性，缺口即报错。
-func enumerateSplit(dir, base, kind string) (vols []string, logicalName string, isSplit bool, err error) {
-	if kind == "pkware" {
-		// PKWARE：base.z01 … base.z(N) + 末卷 base.zip
-		matches, _ := filepath.Glob(filepath.Join(dir, base+".z*"))
-		idx := map[int]string{}
-		maxIdx := 0
-		for _, m := range matches {
-			suf := strings.TrimPrefix(filepath.Base(m), base+".z")
-			if !isAllDigits(suf) {
-				continue
-			}
-			n, _ := strconv.Atoi(suf)
-			idx[n] = m
-			if n > maxIdx {
-				maxIdx = n
-			}
-		}
-		last := filepath.Join(dir, base+".zip")
-		if _, serr := os.Stat(last); serr != nil {
-			return nil, "", true, fmt.Errorf("分卷缺失：%s", last)
-		}
-		if maxIdx == 0 {
-			return nil, "", true, fmt.Errorf("分卷缺失：%s", filepath.Join(dir, base+".z01"))
-		}
-		for n := 1; n <= maxIdx; n++ {
-			if _, ok := idx[n]; !ok {
-				return nil, "", true, fmt.Errorf("分卷缺失：%s", filepath.Join(dir, fmt.Sprintf("%s.z%02d", base, n)))
-			}
-		}
-		vols = make([]string, 0, maxIdx+1)
-		for n := 1; n <= maxIdx; n++ {
-			vols = append(vols, idx[n])
-		}
-		vols = append(vols, last)
-		return vols, base, true, nil
+// nameKindToType 把分卷命名建议类型换算为真实压缩类型。
+// 强命名（pkware / rar 专属后缀）直接确定类型；容器扩展名数字分卷（name.zip.001 等）
+// 由扩展名确定；无容器扩展名的纯数字分卷返回 unknown，交由调用方用真实类型兜底。
+func nameKindToType(nameKind, base string) Kind {
+	switch nameKind {
+	case "pkware":
+		return KindZip
+	case "rarmulti", "rarold":
+		return KindRar
+	case "split":
+		return containerExtKind(base)
 	}
-	// 通用 / 容器分卷：base.<digits>（如 name.zip.001、name.7z.001、name.001）
+	return KindUnknown
+}
+
+// containerExtKind 取 base 的末扩展名对应的压缩类型（仅 zip/7z/rar 支持分卷）。
+func containerExtKind(base string) Kind {
+	switch strings.ToLower(filepath.Ext(base)) {
+	case ".zip":
+		return KindZip
+	case ".7z":
+		return KindSevenZip
+	case ".rar":
+		return KindRar
+	}
+	return KindUnknown
+}
+
+// enumerateSplit 按真实压缩类型 at 分发到对应分卷枚举实现。
+func enumerateSplit(dir, base string, at Kind) (vols []string, logicalName string, isSplit bool, err error) {
+	switch at {
+	case KindZip:
+		return enumerateZipVolumes(dir, base)
+	case KindSevenZip:
+		return enumerateSevenZipVolumes(dir, base)
+	case KindRar:
+		return enumerateRarVolumes(dir, base)
+	}
+	return nil, "", true, fmt.Errorf("暂不支持该类型的分卷解压：%s", at)
+}
+
+// enumerateNumericVolumes 收集 base.NNN 数字分卷（base.zip.001 / base.7z.001 等），按序号校验连续性。
+func enumerateNumericVolumes(dir, base string) (vols []string, logicalName string, isSplit bool, err error) {
 	matches, _ := filepath.Glob(filepath.Join(dir, base+".*"))
 	idx := map[int]string{}
 	maxIdx := 0
@@ -270,6 +312,140 @@ func enumerateSplit(dir, base, kind string) (vols []string, logicalName string, 
 		}
 	}
 	vols = make([]string, 0, maxIdx)
+	for n := 1; n <= maxIdx; n++ {
+		vols = append(vols, idx[n])
+	}
+	return vols, base, true, nil
+}
+
+// enumerateZipVolumes 收集 zip 分卷：PKWARE（base.zNN + base.zip）或数字分卷（base.zip.NNN）。
+func enumerateZipVolumes(dir, base string) (vols []string, logicalName string, isSplit bool, err error) {
+	if strings.HasSuffix(base, ".zip") {
+		// 数字分卷风格：name.zip.001, name.zip.002, …
+		return enumerateNumericVolumes(dir, base)
+	}
+	// PKWARE 风格：base.z01 … base.z(N) + 末卷 base.zip
+	matches, _ := filepath.Glob(filepath.Join(dir, base+".z*"))
+	idx := map[int]string{}
+	maxIdx := 0
+	for _, m := range matches {
+		suf := strings.TrimPrefix(filepath.Base(m), base+".z")
+		if !isAllDigits(suf) {
+			continue
+		}
+		n, _ := strconv.Atoi(suf)
+		idx[n] = m
+		if n > maxIdx {
+			maxIdx = n
+		}
+	}
+	last := filepath.Join(dir, base+".zip")
+	if _, serr := os.Stat(last); serr != nil {
+		return nil, "", true, fmt.Errorf("分卷缺失：%s", last)
+	}
+	if maxIdx == 0 {
+		return nil, "", true, fmt.Errorf("分卷缺失：%s", filepath.Join(dir, base+".z01"))
+	}
+	for n := 1; n <= maxIdx; n++ {
+		if _, ok := idx[n]; !ok {
+			return nil, "", true, fmt.Errorf("分卷缺失：%s", filepath.Join(dir, fmt.Sprintf("%s.z%02d", base, n)))
+		}
+	}
+	vols = make([]string, 0, maxIdx+1)
+	for n := 1; n <= maxIdx; n++ {
+		vols = append(vols, idx[n])
+	}
+	vols = append(vols, last)
+	return vols, base, true, nil
+}
+
+// enumerateSevenZipVolumes 收集 7z 数字分卷：base.7z.001, base.7z.002, …
+func enumerateSevenZipVolumes(dir, base string) (vols []string, logicalName string, isSplit bool, err error) {
+	return enumerateNumericVolumes(dir, base)
+}
+
+// enumerateRarVolumes 收集 RAR 分卷：优先新式 base.partN.rar，否则旧式 base.rar + base.rNN。
+func enumerateRarVolumes(dir, base string) (vols []string, logicalName string, isSplit bool, err error) {
+	if m, _ := filepath.Glob(filepath.Join(dir, base+".part*.rar")); len(m) > 0 {
+		return enumerateRarMulti(dir, base)
+	}
+	return enumerateRarOld(dir, base)
+}
+
+// enumerateRarMulti 收集 RAR 新式分卷：base.part1.rar, base.part2.rar, …（序号从 1 开始）。
+func enumerateRarMulti(dir, base string) (vols []string, logicalName string, isSplit bool, err error) {
+	matches, _ := filepath.Glob(filepath.Join(dir, base+".part*.rar"))
+	idx := map[int]string{}
+	maxIdx := 0
+	lbase := strings.ToLower(base)
+	for _, m := range matches {
+		lb := strings.ToLower(filepath.Base(m))
+		if !strings.HasPrefix(lb, lbase+".part") || !strings.HasSuffix(lb, ".rar") {
+			continue
+		}
+		mid := lb[len(lbase)+len(".part") : len(lb)-len(".rar")]
+		if i := strings.Index(mid, "of"); i > 0 { // 兼容 partNofM 命名（如 part1of5.rar）
+			mid = mid[:i]
+		}
+		if !isAllDigits(mid) {
+			continue
+		}
+		n, _ := strconv.Atoi(mid)
+		idx[n] = m
+		if n > maxIdx {
+			maxIdx = n
+		}
+	}
+	if maxIdx == 0 {
+		return nil, "", true, fmt.Errorf("分卷缺失：%s", filepath.Join(dir, base+".part1.rar"))
+	}
+	for n := 1; n <= maxIdx; n++ {
+		if _, ok := idx[n]; !ok {
+			return nil, "", true, fmt.Errorf("分卷缺失：%s", filepath.Join(dir, fmt.Sprintf("%s.part%d.rar", base, n)))
+		}
+	}
+	vols = make([]string, 0, maxIdx)
+	for n := 1; n <= maxIdx; n++ {
+		vols = append(vols, idx[n])
+	}
+	return vols, base, true, nil
+}
+
+// enumerateRarOld 收集 RAR 旧式分卷：base.rar（首卷） + base.r00, base.r01, …
+func enumerateRarOld(dir, base string) (vols []string, logicalName string, isSplit bool, err error) {
+	first, _ := filepath.Glob(filepath.Join(dir, base+".rar"))
+	if len(first) == 0 {
+		return nil, "", true, fmt.Errorf("分卷缺失：%s", filepath.Join(dir, base+".rar"))
+	}
+	matches, _ := filepath.Glob(filepath.Join(dir, base+".r*"))
+	idx := map[int]string{}
+	maxIdx := 0
+	lbase := strings.ToLower(base)
+	for _, m := range matches {
+		lb := strings.ToLower(filepath.Base(m))
+		if !strings.HasPrefix(lb, lbase+".r") {
+			continue
+		}
+		suf := lb[len(lbase)+len(".r"):]
+		if len(suf) < 2 || !isAllDigits(suf) {
+			continue // 排除首卷 .rar
+		}
+		n, _ := strconv.Atoi(suf)
+		idx[n+1] = m
+		if n+1 > maxIdx {
+			maxIdx = n + 1
+		}
+	}
+	if maxIdx == 0 {
+		return nil, "", true, fmt.Errorf("分卷缺失：%s", filepath.Join(dir, base+".r00"))
+	}
+	for n := 1; n <= maxIdx; n++ {
+		if _, ok := idx[n]; !ok {
+			return nil, "", true, fmt.Errorf("分卷缺失：%s", filepath.Join(dir, fmt.Sprintf("%s.r%02d", base, n-1)))
+		}
+	}
+	vols = make([]string, 0, maxIdx+1)
+	vols = append(vols, first[0])
 	for n := 1; n <= maxIdx; n++ {
 		vols = append(vols, idx[n])
 	}
@@ -333,8 +509,6 @@ func extractSniff(ctx context.Context, src, targetDir string, passwords []string
 		return extractZip(ctx, zr, total, targetDir, passwords, limits, p)
 	case is7zMagic(buf):
 		return extract7z(ctx, ra, total, targetDir, passwords, limits, p)
-	case isRarMagic(buf):
-		return extractRarWith(ctx, readerAtRarOpener(ra, total), total, targetDir, passwords, limits, p)
 	default:
 		return ErrUnsupportedFormat
 	}

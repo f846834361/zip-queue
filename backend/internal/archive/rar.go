@@ -38,33 +38,26 @@ func fileRarOpener(src string) rarOpener {
 	}
 }
 
-// readerAtRarOpener 从 io.ReaderAt 打开 rar（分卷拼接或魔数嗅探场景）。
-func readerAtRarOpener(ra io.ReaderAt, total int64) rarOpener {
-	return func(password string) (rarSource, func(), error) {
-		var r *rardecode.Reader
-		var err error
-		sr := io.NewSectionReader(ra, 0, total)
-		if password == "" {
-			r, err = rardecode.NewReader(sr)
-		} else {
-			r, err = rardecode.NewReader(sr, rardecode.Password(password))
-		}
-		if err != nil {
-			return nil, nil, err
-		}
-		return r, func() {}, nil
-	}
+// extractRar 解压单个 RAR 归档（含加密、头部加密）到 targetDir。
+func extractRar(ctx context.Context, src, targetDir string, passwords []string, limits Limits, p ProgressFn) error {
+	return extractRarVolumes(ctx, []string{src}, targetDir, passwords, limits, p)
 }
 
-// extractRar 解压 RAR 归档（含加密、头部加密）到 targetDir。
+// extractRarVolumes 解压 RAR 分卷集：vols[0] 必须是首卷，其余卷由 rardecode 按命名自行续接。
+// 注意：RAR 每卷都自带归档头，不能像 zip 分卷那样拼接成单一字节流，故此处只传首卷。
 // rardecode 的条目是流式推进的（无法随机重复遍历），故分两遍：
 // 第一遍仅扫描条目以计算智能合并前缀与总量（进度/限额），第二遍才真正写出文件。
-func extractRar(ctx context.Context, src, targetDir string, passwords []string, limits Limits, p ProgressFn) error {
-	total, err := fileSize(src)
-	if err != nil {
-		return err
+func extractRarVolumes(ctx context.Context, vols []string, targetDir string, passwords []string, limits Limits, p ProgressFn) error {
+	if len(vols) == 0 {
+		return fmt.Errorf("open rar: 分卷列表为空")
 	}
-	return extractRarWith(ctx, fileRarOpener(src), total, targetDir, passwords, limits, p)
+	var total int64
+	for _, v := range vols {
+		if fi, err := os.Stat(v); err == nil {
+			total += fi.Size()
+		}
+	}
+	return extractRarWith(ctx, fileRarOpener(vols[0]), total, targetDir, passwords, limits, p)
 }
 
 func extractRarWith(ctx context.Context, open rarOpener, total int64, targetDir string, passwords []string, limits Limits, p ProgressFn) error {
